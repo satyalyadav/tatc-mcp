@@ -227,115 +227,116 @@ def _format_result(result: Any) -> List[TextContent]:
 # Register tools
 @server.list_tools()
 async def list_tools() -> List[Tool]:
-        """List available tools."""
-        return [
-            Tool(
-                name="generate_ground_track",
-                description=(
-                    "Generate ground track for a satellite over a specified time period with configurable time steps. "
-                    "CRITICAL: When user mentions time steps (e.g., '10 second steps', 'every 30 seconds', '1 minute intervals', '10 sec time step'), "
-                    "you MUST extract and include the step_interval parameter. Examples: "
-                    "User says '10 second time steps' -> step_interval='10 seconds', "
-                    "User says 'every 30 sec' -> step_interval='30 sec', "
-                    "User says '1 minute steps' -> step_interval='1 minute'. "
-                    "Time steps can be in seconds ('10 seconds', '30 sec'), minutes ('1 minute', '5 mins'), or hours. "
-                    "If user does NOT mention time steps, default is '1 minute'. "
-                    "Returns telemetry data matching SCHEMA.txt format."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "satellite_identifier": {
-                            "type": "string",
-                            "description": "Satellite name (e.g., 'ISS', 'Hubble') or NORAD ID"
-                        },
-                        "start_time": {
-                            "type": "string",
-                            "description": "Start time (ISO-8601 or 'now', default: now)"
-                        },
-                        "duration": {
-                            "type": "string",
-                            "description": "Duration (e.g., '1 hour', '60 minutes', default: 1 hour)"
-                        },
-                        "step_interval": {
-                            "type": "string",
-                            "description": (
-                                "REQUIRED when user specifies a time step. Time step interval between data points. "
-                                "Supports: seconds ('10 seconds', '30 sec', '10 sec'), minutes ('1 minute', '5 mins', '1 min'), or hours ('1 hour'). "
-                                "Examples: '10 seconds', '30 sec', '1 minute', '5 mins', '1 hour'. "
-                                "If user says '10 second time step' or 'every 10 seconds', use '10 seconds'. "
-                                "If user says '1 minute steps' or 'every minute', use '1 minute'. "
-                                "Default: '1 minute' only if user does not specify any time step."
-                            )
-                        }
-                    },
-                    "required": ["satellite_identifier"]
-                }
+    """List available tools."""
+    return [
+        Tool(
+            name="generate_ground_track",
+            description=(
+                "Generate ground track for a satellite over a specified time period with configurable time steps. "
+                "CRITICAL: When user mentions time steps (e.g., '10 second steps', 'every 30 seconds', '1 minute intervals', '10 sec time step'), "
+                "you MUST extract and include the step_interval parameter. Examples: "
+                "User says '10 second time steps' -> step_interval='10 seconds', "
+                "User says 'every 30 sec' -> step_interval='30 sec', "
+                "User says '1 minute steps' -> step_interval='1 minute'. "
+                "Time steps can be in seconds ('10 seconds', '30 sec'), minutes ('1 minute', '5 mins'), or hours. "
+                "If user does NOT mention time steps, default is '1 minute'. "
+                "Returns telemetry data matching SCHEMA.txt format."
             ),
-            Tool(
-                name="get_satellite_info",
-                description="Get satellite information including TLE data from CelesTrak.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "satellite_identifier": {
-                            "type": "string",
-                            "description": "Satellite name (e.g., 'ISS') or NORAD ID"
-                        }
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "satellite_identifier": {
+                        "type": "string",
+                        "description": "Satellite name (e.g., 'ISS', 'Hubble') or NORAD ID"
                     },
-                    "required": ["satellite_identifier"]
-                }
+                    "start_time": {
+                        "type": "string",
+                        "description": "Start time (ISO-8601 or 'now', default: now)"
+                    },
+                    "duration": {
+                        "type": "string",
+                        "description": "Duration (e.g., '1 hour', '60 minutes', default: 1 hour)"
+                    },
+                    "step_interval": {
+                        "type": "string",
+                        "description": (
+                            "REQUIRED when user specifies a time step. Time step interval between data points. "
+                            "Supports: seconds ('10 seconds', '30 sec', '10 sec'), minutes ('1 minute', '5 mins', '1 min'), or hours ('1 hour'). "
+                            "Examples: '10 seconds', '30 sec', '1 minute', '5 mins', '1 hour'. "
+                            "If user says '10 second time step' or 'every 10 seconds', use '10 seconds'. "
+                            "If user says '1 minute steps' or 'every minute', use '1 minute'. "
+                            "Default: '1 minute' only if user does not specify any time step."
+                        )
+                    }
+                },
+                "required": ["satellite_identifier"]
+            }
+        ),
+        Tool(
+            name="get_satellite_info",
+            description="Get satellite information including TLE data from CelesTrak.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "satellite_identifier": {
+                        "type": "string",
+                        "description": "Satellite name (e.g., 'ISS') or NORAD ID"
+                    }
+                },
+                "required": ["satellite_identifier"]
+            }
+        ),
+        Tool(
+            name="search_satellites",
+            description=(
+                "Search for satellites by name in the CelesTrak database. "
+                "Useful when you don't know the exact satellite name or NORAD ID. "
+                "Returns a list of matching satellites with their NORAD IDs that can be used for visualization."
             ),
-            Tool(
-                name="search_satellites",
-                description=(
-                    "Search for satellites by name in the CelesTrak database. "
-                    "Useful when you don't know the exact satellite name or NORAD ID. "
-                    "Returns a list of matching satellites with their NORAD IDs that can be used for visualization."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Satellite name or partial name to search for (e.g., 'Starlink', 'GPS', 'NOAA', 'Hubble')"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of results to return (default: 10, max recommended: 50)",
-                            "default": 10
-                        }
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Satellite name or partial name to search for (e.g., 'Starlink', 'GPS', 'NOAA', 'Hubble')"
                     },
-                    "required": ["query"]
-                }
-            )
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default: 10, max recommended: 50)",
+                        "default": 10
+                    }
+                },
+                "required": ["query"]
+            }
+        )
         ]
+
+
+@server.call_tool()
+async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
+    """Handle tool calls."""
+    handlers: Dict[str, Callable[[], Any]] = {
+        "generate_ground_track": lambda: handle_generate_ground_track(
+            satellite_identifier=arguments.get("satellite_identifier"),
+            start_time=arguments.get("start_time"),
+            duration=arguments.get("duration"),
+            step_interval=arguments.get("step_interval")
+        ),
+        "get_satellite_info": lambda: handle_get_satellite_info(
+            satellite_identifier=arguments.get("satellite_identifier")
+        ),
+        "search_satellites": lambda: handle_search_satellites(
+            query=arguments.get("query"),
+            limit=arguments.get("limit", 10)
+        )
+    }
     
-    @server.call_tool()
-    async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle tool calls."""
-        handlers: Dict[str, Callable[[], Any]] = {
-            "generate_ground_track": lambda: handle_generate_ground_track(
-                satellite_identifier=arguments.get("satellite_identifier"),
-                start_time=arguments.get("start_time"),
-                duration=arguments.get("duration"),
-                step_interval=arguments.get("step_interval")
-            ),
-            "get_satellite_info": lambda: handle_get_satellite_info(
-                satellite_identifier=arguments.get("satellite_identifier")
-            ),
-            "search_satellites": lambda: handle_search_satellites(
-                query=arguments.get("query"),
-                limit=arguments.get("limit", 10)
-            )
-        }
-        
-        handler = handlers.get(name)
-        if not handler:
-            raise ValueError(f"Unknown tool: {name}")
-        
-        result = await handler()
-        return _format_result(result)
+    handler = handlers.get(name)
+    if not handler:
+        raise ValueError(f"Unknown tool: {name}")
+    
+    result = await handler()
+    return _format_result(result)
 
 
 # Run MCP server
