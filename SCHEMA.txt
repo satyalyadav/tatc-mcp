@@ -1,0 +1,49 @@
+**Telemetry Schema (LLA + GeoJSON) - Fields & Types**
+
+* **id:** `string` (non-empty); stable satellite/platform identifier.
+* **time:** `string` ISO-8601 UTC (`YYYY-MM-DDThh:mm:ssZ`); authoritative message epoch.
+* **position_lla:** `json object`
+
+  * `lat_deg:` `float` in `[-90, 90]`
+  * `lon_deg:` `float` in `[-180, 180]`
+  * `alt_m:` `float` (meters)
+* **lookpoint_lla (optional):** `json object` — ground boresight target
+
+  * `lat_deg:` `float` in `[-90, 90]`
+  * `lon_deg:` `float` in `[-180, 180]`
+  * `alt_m:` `float` (meters; default `0` if omitted)
+* **footprint_geojson (optional):** `GeoJSON Feature<Polygon>`; coordinates in [lon, lat] (WGS84); `properties` must be `{}` (reserved/ignored by viewer).
+* **state_flags (optional):** `string[]` (free-text; e.g., `"nominal"`, `"slewing"`, `"idle"`).
+* **trajectory_batches (optional):** `array` of `{ time: ISO-8601 UTC string, position_lla: json object (same shape as above) }`.
+
+**Validation & Limits**
+
+* **Coordinates:** `lat_deg ∈ [-90,90]`, `lon_deg ∈ [-180,180]`.
+* **Altitude:** `alt_m` is meters. Negative values are valid.
+* **Time:** strict ISO-8601 UTC with trailing `Z`; newer timestamps always supersede older ones for the same `id`.
+* **GeoJSON Polygon:** WGS84 lon/lat order.
+* **state_flags:** free text (no enum constraints).
+
+**Semantics (What each field means)**
+
+* **id:** binds platform history and references across messages.
+* **time:** authoritative epoch for interpolation and cache invalidation.
+* **position_lla:** platform placement for interpolation; ECEF can be derived client-side if needed.
+* **lookpoint_lla:** boresight ground target; used to rotate/aim the beam/footprint (bearing from satellite to lookpoint).
+* **footprint_geojson:** the coverage area to render/fill on the map (canonical footprint).
+* **state_flags:** lightweight status strings for styling/filtering/search.
+* **trajectory_batches:** short preview track for scrub/anticipation.
+
+**Syntax Guidelines**
+
+* One JSON object per message.
+* Use explicit names with units (`lat_deg`, `alt_m`).
+* Optional fields do not clear prior client values when omitted.
+* Default: `lookpoint_lla.alt_m = 0` if omitted.
+
+**Dynamics & Merge Rules**
+
+* **Partial updates:** merge by key; missing fields keep last known values (no flicker).
+* **Rebuild triggers:** recompute beams/footprints when inputs change (`lookpoint_lla`, `footprint_geojson`) or a newer `time` arrives.
+* **Staleness:** drop messages older than the last applied `time` for the same `id`.
+* **TTL (optional):** if an entity has not updated within e.g. 30 s, fade or remove to prevent stale visuals.
