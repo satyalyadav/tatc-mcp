@@ -20,11 +20,11 @@ from tatc_integration import create_satellite_from_tle, generate_ground_track
 from schema_formatter import format_ground_track_response
 from validation import validate_time_range, validate_step_interval
 
-
 # Initialize server
 server = Server("tatc-mcp-server")
 
 
+# Time parsing utilities
 # Time unit normalization mapping
 _TIME_UNITS = {
     "second": "seconds", "sec": "seconds", "secs": "seconds",
@@ -88,7 +88,7 @@ def parse_time_input(time_str: str) -> datetime:
         time_str: Time string to parse
         
     Returns:
-        datetime object (UTC)
+        datetime object (UTC, naive)
     """
     time_str = time_str.strip().lower()
     
@@ -228,7 +228,7 @@ def _format_result(result: Any) -> List[TextContent]:
 @server.list_tools()
 async def list_tools() -> List[Tool]:
     """List available tools."""
-    return [
+    tools = [
         Tool(
             name="generate_ground_track",
             description=(
@@ -291,7 +291,7 @@ async def list_tools() -> List[Tool]:
             description=(
                 "Search for satellites by name in the CelesTrak database. "
                 "Useful when you don't know the exact satellite name or NORAD ID. "
-                "Returns a list of matching satellites with their NORAD IDs that can be used for visualization."
+                "Returns a list of matching satellites with their NORAD IDs."
             ),
             inputSchema={
                 "type": "object",
@@ -309,7 +309,9 @@ async def list_tools() -> List[Tool]:
                 "required": ["query"]
             }
         )
-        ]
+    ]
+    
+    return tools
 
 
 @server.call_tool()

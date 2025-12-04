@@ -1,13 +1,13 @@
 # TAT-C MCP Server
 
-An MCP (Model Context Protocol) server that provides satellite ground track generation using the TAT-C (Tradespace Analysis Toolkit for Constellations) library. This server works with LLMs like Gemini 2.5 Flash to process natural language prompts and generate satellite telemetry data.
+An MCP (Model Context Protocol) server that provides satellite ground track generation using the TAT-C (Tradespace Analysis Toolkit for Constellations) library. This server is **LLM-agnostic** and works with any LLM client that supports the MCP protocol (e.g., Claude Desktop, custom MCP clients, etc.). It communicates via stdio using the standard MCP protocol, allowing you to use your choice of LLM.
 
 ## Features
 
 - **TLE Data Fetching**: Automatically fetches Two-Line Element (TLE) data from CelesTrak
 - **Ground Track Generation**: Computes satellite ground tracks over specified time periods
 - **Schema Compliance**: Outputs data in the format specified by SCHEMA.txt
-- **Natural Language Processing**: Works with LLMs to interpret user prompts like "give the ISS ground track for the next hour at 1 minute steps"
+- **LLM Integration**: Works with any MCP-compatible LLM client to interpret natural language prompts like "give the ISS ground track for the next hour at 1 minute steps"
 
 ## Prerequisites
 
@@ -49,32 +49,6 @@ pip install mcp requests python-dateutil
 pip install git+https://github.com/code-lab-org/tatc.git
 ```
 
-## Configuration for Gemini 2.5 Flash
-
-To use this MCP server with Gemini 2.5 Flash, you need to configure it in your MCP client settings. The exact configuration depends on your MCP client implementation.
-
-### Example Configuration
-
-For a typical MCP client configuration (e.g., in a config file):
-
-```json
-{
-  "mcpServers": {
-    "tatc-mcp": {
-      "command": "python",
-      "args": ["/path/to/tatc-mcp/server.py"],
-      "env": {
-        "PYTHONPATH": "/path/to/tatc-mcp"
-      }
-    }
-  }
-}
-```
-
-### Using with stdio Transport
-
-The server uses stdio transport by default. Make sure your MCP client is configured to communicate via stdio.
-
 ## Usage
 
 ### Running the Server
@@ -86,6 +60,22 @@ python server.py
 ```
 
 The server will listen for MCP protocol messages on stdin/stdout.
+
+### Using with Your Choice of LLM
+
+This MCP server is **LLM-agnostic** and works with any LLM client that supports the MCP protocol. The server communicates via stdio using the standard MCP protocol, so you can use it with:
+
+- **Claude Desktop**: Configure the server in your MCP settings
+- **Custom MCP clients**: Any client that implements the MCP protocol
+- **Other LLM platforms**: Any platform that supports MCP servers
+
+To use this server, configure your LLM client to run:
+
+```bash
+python /path/to/tatc-mcp/server.py
+```
+
+The server will automatically handle tool registration and execution through the MCP protocol. No LLM-specific code or dependencies are required.
 
 ### Available Tools
 
@@ -137,7 +127,7 @@ Search for satellites by name in the CelesTrak database. Useful when you don't k
 **Returns:**
 List of satellite dictionaries, each containing:
 
-- `norad_id`: NORAD catalog number (use this for visualization)
+- `norad_id`: NORAD catalog number
 - `name`: Full satellite name
 - `object_type`: Type of object (e.g., "PAYLOAD", "DEBRIS")
 - `country`: Country of origin
@@ -226,18 +216,8 @@ tatc-mcp/
 ├── pyproject.toml        # Project configuration
 ├── requirements.txt      # Python dependencies
 ├── .gitignore           # Git ignore rules
-├── README.md            # This file
-└── visualization/        # Optional web-based visualization (separate)
-    ├── cesium_viewer.html # Cesium 3D visualization frontend
-    ├── web_server.py      # Flask backend for visualization
-    └── README.md          # Visualization setup instructions
+└── README.md            # This file
 ```
-
-## Visualization (Optional)
-
-A web-based Cesium visualization frontend is available in the `visualization/` directory. This allows you to visualize satellite ground tracks in a 3D globe interface. See `visualization/README.md` for setup and usage instructions.
-
-**Note:** The visualization is completely separate from the core MCP server. You can publish or use the MCP server without the visualization components.
 
 ## Error Handling
 

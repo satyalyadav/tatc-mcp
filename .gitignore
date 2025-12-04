@@ -47,8 +47,11 @@ Thumbs.db
 .cache/
 .env
 
-# Exclude visualization directory
+# Exclude visualization directory (local only)
 visualization/
+
+# Exclude celery directory (local only)
+celery/
 
 # Exclude test files
 curl_test.txt
