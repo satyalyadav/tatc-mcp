@@ -30,10 +30,10 @@ pip install git+https://github.com/code-lab-org/tatc.git
 ### Running the Server
 
 ```bash
-python server.py
+python -m tatc_mcp.server
 ```
 
-The server listens for MCP protocol messages on stdin/stdout. Configure your LLM client to run this command to use the server.
+The server listens for MCP protocol messages on stdin/stdout. Configure your LLM client to run this command to use the server from the project root.
 
 ## Available Tools
 
