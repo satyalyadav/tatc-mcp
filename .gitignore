@@ -56,3 +56,4 @@ celery/
 # Exclude test files
 curl_test.txt
 
+paper.md

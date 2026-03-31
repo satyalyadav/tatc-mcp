@@ -111,6 +111,89 @@ Field summary:
 - `position_lla.alt_m`: altitude in meters
 - `footprint_geojson`: optional GeoJSON polygon for visualization
 
+## Using With MCP Clients
+
+### Codex CLI
+
+Codex supports both local STDIO servers and remote Streamable HTTP servers. The official configuration file is `~/.codex/config.toml`.
+
+In the current Windows + WSL setup used for this project, this local STDIO configuration is working:
+
+```toml
+[mcp_servers.tatc]
+command = "wsl.exe"
+args = ["bash", "-lc", "cd /home/satyal/tatc-mcp && python3 -m tatc_mcp.server"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+enabled = true
+```
+
+You can also add the same server from the CLI:
+
+```bash
+codex mcp add tatc -- wsl.exe bash -lc "cd /home/satyal/tatc-mcp && python3 -m tatc_mcp.server"
+```
+
+### Codex App
+
+In the current setup, the Codex app is reading the same `~/.codex/config.toml` entry successfully after restart. Use the same `tatc` block shown above.
+
+Official Codex docs explicitly describe shared MCP configuration for the CLI and IDE extension. In this project, the app is also consuming that shared configuration successfully in practice.
+
+### Claude Code
+
+Claude Code supports both local STDIO servers and remote HTTP servers.
+
+From the project root on Linux or WSL, you can add this server with:
+
+```bash
+claude mcp add tatc -- python3 -m tatc_mcp.server
+```
+
+If you want to add it from outside the repo directory, use:
+
+```bash
+claude mcp add tatc -- bash -lc 'cd /home/satyal/tatc-mcp && python3 -m tatc_mcp.server'
+```
+
+On native Windows, the same pattern can be run through WSL:
+
+```bash
+claude mcp add tatc -- wsl.exe --cd /home/satyal/tatc-mcp python3 -m tatc_mcp.server
+```
+
+### Cursor
+
+Cursor supports `stdio`, `SSE`, and `Streamable HTTP` MCP transports. For the current local setup, use a project `.cursor/mcp.json` or global `~/.cursor/mcp.json` with a local STDIO server.
+
+Example `mcp.json` entry for Windows + WSL:
+
+```json
+{
+  "mcpServers": {
+    "tatc": {
+      "type": "stdio",
+      "command": "wsl.exe",
+      "args": ["bash", "-lc", "cd /home/satyal/tatc-mcp && python3 -m tatc_mcp.server"]
+    }
+  }
+}
+```
+
+### Web Interfaces
+
+ChatGPT Developer Mode and Claude web custom connectors require a remote MCP server URL. Local STDIO servers are not enough for those web interfaces.
+
+That means this repository can be used locally today with Codex CLI, the current Codex app setup, Claude Code, and Cursor without hosting. To use it with ChatGPT web or Claude web, you first need a remote MCP transport in this project, then you need to host it at a reachable HTTPS URL. For new work, prefer HTTP or Streamable HTTP. Claude still supports SSE for remote connectors, but Anthropic documents SSE as deprecated where HTTP is available.
+
+### References
+
+- Codex MCP: https://developers.openai.com/codex/mcp
+- ChatGPT Developer Mode: https://developers.openai.com/api/docs/guides/developer-mode
+- Claude Code MCP: https://code.claude.com/docs/en/mcp
+- Claude custom connectors: https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp
+- Cursor MCP: https://docs.cursor.com/en/context/mcp
+
 ## Troubleshooting
 
 **MCP SDK Errors:**
