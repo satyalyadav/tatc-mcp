@@ -185,16 +185,16 @@ def validate_coordinates(lat_deg: float, lon_deg: float) -> Tuple[float, float]:
 
 def validate_altitude(
     alt_m: float,
-    min_alt: float = -100000.0,
-    max_alt: float = 1000000.0,
+    min_alt: Optional[float] = None,
+    max_alt: Optional[float] = None,
 ) -> float:
     """
     Validate altitude.
 
     Args:
         alt_m: Altitude in meters
-        min_alt: Minimum altitude in meters (default: -100km)
-        max_alt: Maximum altitude in meters (default: 1000km)
+        min_alt: Optional minimum altitude in meters
+        max_alt: Optional maximum altitude in meters
 
     Returns:
         Validated altitude
@@ -207,12 +207,11 @@ def validate_altitude(
 
     alt_m = float(alt_m)
 
-    if alt_m < min_alt:
+    if min_alt is not None and alt_m < min_alt:
         raise ValueError(f"Altitude {alt_m}m is below minimum {min_alt}m")
 
-    if alt_m > max_alt:
+    if max_alt is not None and alt_m > max_alt:
         raise ValueError(f"Altitude {alt_m}m is above maximum {max_alt}m")
 
     return alt_m
-
 

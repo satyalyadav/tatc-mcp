@@ -1,9 +1,10 @@
-"""Format TAT-C outputs to match SCHEMA.txt specification."""
+"""Format TAT-C outputs to match server telemetry format specification."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 
 from tatc_mcp.validation import validate_coordinates as _validate_coordinates
+from tatc_mcp.validation import validate_altitude as _validate_altitude
 
 
 def validate_coordinates(lat_deg: float, lon_deg: float) -> Tuple[float, float]:
@@ -33,26 +34,19 @@ def format_timestamp(time: datetime) -> str:
     Returns:
         ISO-8601 UTC string with trailing 'Z'
     """
-    # Ensure timezone-aware UTC
     if time.tzinfo is None:
-        # Assume UTC if timezone-naive
-        from datetime import timezone
-
         time = time.replace(tzinfo=timezone.utc)
+    else:
+        time = time.astimezone(timezone.utc)
 
-    # Format as ISO-8601 with 'Z' suffix
-    iso_str = time.isoformat()
-    if iso_str.endswith("+00:00"):
-        iso_str = iso_str[:-6] + "Z"
-    elif not iso_str.endswith("Z"):
-        iso_str = iso_str + "Z"
-
-    return iso_str
+    # server telemetry format requires strict UTC timestamps with trailing Z.
+    time = time.replace(microsecond=0)
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def format_position_lla(lat_deg: float, lon_deg: float, alt_m: float) -> Dict[str, float]:
     """
-    Format position as LLA object per SCHEMA.txt.
+    Format position as LLA object per server telemetry format.
 
     Args:
         lat_deg: Latitude in degrees
@@ -63,6 +57,7 @@ def format_position_lla(lat_deg: float, lon_deg: float, alt_m: float) -> Dict[st
         Dictionary with lat_deg, lon_deg, alt_m
     """
     lat_deg, lon_deg = validate_coordinates(lat_deg, lon_deg)
+    alt_m = _validate_altitude(alt_m)
 
     return {
         "lat_deg": float(lat_deg),
@@ -73,7 +68,7 @@ def format_position_lla(lat_deg: float, lon_deg: float, alt_m: float) -> Dict[st
 
 def format_footprint_geojson(coordinates: List[List[float]]) -> Optional[Dict[str, Any]]:
     """
-    Format footprint coordinates as GeoJSON Feature<Polygon> per SCHEMA.txt.
+    Format footprint coordinates as GeoJSON Feature<Polygon> per server telemetry format.
 
     Args:
         coordinates: List of [lon, lat] coordinate pairs
@@ -104,7 +99,7 @@ def format_footprint_geojson(coordinates: List[List[float]]) -> Optional[Dict[st
         validated_coords.append(validated_coords[0])
 
     # Create GeoJSON Feature<Polygon>
-    # Per SCHEMA.txt: coordinates in [lon, lat] (WGS84), properties must be {}
+    # Per server telemetry format: coordinates in [lon, lat] (WGS84), properties must be {}
     return {
         "type": "Feature",
         "geometry": {
@@ -119,7 +114,7 @@ def format_trajectory_batch(
     ground_track: List[Tuple[datetime, float, float, float]]
 ) -> List[Dict[str, Any]]:
     """
-    Format ground track as trajectory_batches array per SCHEMA.txt.
+    Format ground track as trajectory_batches array per server telemetry format.
 
     Args:
         ground_track: List of (time, lat_deg, lon_deg, alt_m) tuples
@@ -154,7 +149,7 @@ def format_telemetry_message(
     state_flags: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    Format a complete telemetry message per SCHEMA.txt.
+    Format a complete telemetry message per server telemetry format.
 
     Args:
         satellite_id: Stable satellite/platform identifier
@@ -166,7 +161,7 @@ def format_telemetry_message(
         state_flags: Optional list of state flag strings
 
     Returns:
-        Dictionary matching SCHEMA.txt format
+        Dictionary matching the server telemetry format
     """
     if not satellite_id or not satellite_id.strip():
         raise ValueError("satellite_id must be a non-empty string")
@@ -238,5 +233,4 @@ def format_ground_track_response(
             continue
 
     return messages
-
 

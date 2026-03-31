@@ -1,18 +1,18 @@
 # TAT-C MCP Server
 
-An MCP (Model Context Protocol) server that provides satellite ground track generation using the TAT-C library. This server makes it easy to gather satellite telemetry data through natural language prompts, and the data can be used for visualization or analysis.
+An MCP (Model Context Protocol) server that provides satellite ground track generation using the TAT-C library. The project is intentionally server-first: it exposes a standalone MCP server that can be used with any MCP-compatible LLM client and returns a consistent telemetry payload for downstream tools.
 
 **Use Cases:**
 
 - **Easy Data Gathering**: Use natural language to request satellite ground tracks (e.g., "give me the ISS ground track for the next hour")
-- **Visualization**: The generated data can be used with visualization tools to display satellite trajectories on maps
-- **LLM Integration**: Works with any MCP-compatible LLM client (Claude Desktop, custom clients, etc.)
+- **Visualization Ready**: The generated data can be passed to downstream visualization tools and map/globe frontends
+- **LLM Integration**: Works with any MCP-compatible LLM client
 
 ## Features
 
-- **TLE Data Fetching**: Automatically fetches Two-Line Element (TLE) data from CelesTrak
+- **Satellite Metadata + TLE Fetching**: Resolves satellite identity and fetches current metadata/TLE data from CelesTrak
 - **Ground Track Generation**: Computes satellite ground tracks over specified time periods
-- **Schema Compliance**: Outputs data in SCHEMA.txt format
+- **Structured Output**: Outputs stable telemetry objects with position and optional geometry fields
 - **LLM-Agnostic**: Works with any MCP-compatible LLM client
 
 ## Quick Start
@@ -22,10 +22,9 @@ An MCP (Model Context Protocol) server that provides satellite ground track gene
 ```bash
 # Install dependencies
 pip install -r requirements.txt
-
-# Install TAT-C library
-pip install git+https://github.com/code-lab-org/tatc.git
 ```
+
+The core dependency set pins `numpy<2.2` as a compatibility safeguard for environments that resolve `numba 0.61.x`, which does not support NumPy 2.2+.
 
 ### Running the Server
 
@@ -44,11 +43,11 @@ Generates ground track for a satellite.
 **Parameters:**
 
 - `satellite_identifier` (required): Satellite name (e.g., "ISS") or NORAD ID
-- `start_time` (optional): Start time in ISO-8601 format or "now" (default: "now")
-- `duration` (optional): Duration (e.g., "1 hour", default: "1 hour")
+- `start_time` (optional): Start time in ISO-8601 format, `"now"`, or relative forms such as `"in one hour"` (default: `"now"`)
+- `duration` (optional): Duration (e.g., `"1 hour"` or `"one hour"`, default: `"1 hour"`)
 - `step_interval` (optional): Time step (e.g., "1 minute", default: "1 minute")
 
-**Returns:** Array of telemetry objects with `id`, `time`, `position_lla` (lat/lon/alt), and optional `footprint_geojson` and `trajectory_batches`.
+**Returns:** Array of telemetry objects with `id`, `time`, `position_lla` (lat/lon/alt), and optional `footprint_geojson` when geometry is available.
 
 ### `get_satellite_info`
 
@@ -80,15 +79,15 @@ Search for satellites by name in the CelesTrak database.
 
 ## Supported Satellite Names
 
-The server automatically searches the CelesTrak database (30,000+ satellites). You can use:
+The server supports:
 
-- **Common names**: "ISS", "Hubble", "TESS", "James Webb", "NOAA-19"
-- **Partial names**: "Starlink", "GPS", "NOAA" (finds matching satellites)
-- **NORAD IDs**: Direct numeric IDs like "25544"
+- **NORAD IDs**: Direct numeric IDs like `"25544"`
+- **Exact/common names**: `"ISS"`, `"Hubble"`, `"James Webb"`, `"NOAA-19"`
+- **Search-first workflows**: for broad or ambiguous terms such as `"Starlink"` or `"GPS"`, use `search_satellites` first and then pass the exact name or NORAD ID to the other tools
 
 ## Output Format
 
-Data follows SCHEMA.txt format:
+The server returns an array of telemetry objects shaped like:
 
 ```json
 {
@@ -99,18 +98,20 @@ Data follows SCHEMA.txt format:
     "lon_deg": -0.1234,
     "alt_m": 408000.0
   },
-  "footprint_geojson": { ... },
-  "trajectory_batches": [ ... ]
+  "footprint_geojson": { ... }
 }
 ```
 
+Field summary:
+
+- `id`: stable satellite identifier
+- `time`: ISO-8601 UTC timestamp
+- `position_lla.lat_deg`: latitude in degrees
+- `position_lla.lon_deg`: longitude in degrees
+- `position_lla.alt_m`: altitude in meters
+- `footprint_geojson`: optional GeoJSON polygon for visualization
+
 ## Troubleshooting
-
-**TAT-C Import Errors:**
-
-```bash
-pip install git+https://github.com/code-lab-org/tatc.git
-```
 
 **MCP SDK Errors:**
 

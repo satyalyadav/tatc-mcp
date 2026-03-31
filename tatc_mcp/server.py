@@ -17,7 +17,11 @@ except ImportError:
     sys.exit(1)
 
 from tatc_mcp.celestrak_client import get_satellite_info, search_satellites_by_name
-from tatc_mcp.tatc_integration import create_satellite_from_tle, generate_ground_track
+from tatc_mcp.tatc_integration import (
+    create_satellite_from_tle,
+    generate_ground_track,
+    calculate_footprint_from_position,
+)
 from tatc_mcp.schema_formatter import format_ground_track_response
 from tatc_mcp.validation import validate_time_range, validate_step_interval
 
@@ -48,6 +52,39 @@ _UNIT_TO_DELTA = {
     "days": lambda amount: timedelta(days=amount),
 }
 
+_WORD_NUMBERS = {
+    "a": 1,
+    "an": 1,
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+
 
 def _parse_time_unit(unit: str) -> Optional[str]:
     """Normalize time unit string."""
@@ -62,8 +99,28 @@ def _unit_to_timedelta(unit: str, amount: float) -> timedelta:
     return converter(amount)
 
 
+def _parse_amount_phrase(amount_str: str) -> float:
+    """Parse a numeric or simple word-number amount."""
+    normalized = amount_str.strip().lower().replace("-", " ")
+    if not normalized:
+        raise ValueError("Amount is required")
+
+    try:
+        return float(normalized)
+    except ValueError:
+        pass
+
+    total = 0
+    for token in normalized.split():
+        if token not in _WORD_NUMBERS:
+            raise ValueError(f"Unknown amount token: {token}")
+        total += _WORD_NUMBERS[token]
+
+    return float(total)
+
+
 def _parse_relative_time(time_str: str) -> Optional[datetime]:
-    """Parse relative time expressions like 'in 1 hour'."""
+    """Parse relative time expressions like 'in 1 hour' or 'in one hour'."""
     if not time_str.startswith("in "):
         return None
 
@@ -72,8 +129,8 @@ def _parse_relative_time(time_str: str) -> Optional[datetime]:
         if len(parts) < 2:
             return None
 
-        amount = int(parts[0])
-        unit = _parse_time_unit(parts[1])
+        amount = _parse_amount_phrase(" ".join(parts[:-1]))
+        unit = _parse_time_unit(parts[-1])
         if not unit:
             return None
 
@@ -143,10 +200,10 @@ def parse_duration(duration_str: str) -> timedelta:
         if len(parts) < 2:
             raise ValueError("Duration must include a unit")
 
-        amount = float(parts[0])
-        unit = _parse_time_unit(parts[1])
+        amount = _parse_amount_phrase(" ".join(parts[:-1]))
+        unit = _parse_time_unit(parts[-1])
         if not unit:
-            raise ValueError(f"Unknown time unit: {parts[1]}")
+            raise ValueError(f"Unknown time unit: {parts[-1]}")
 
         return _unit_to_timedelta(unit, amount)
     except (ValueError, IndexError) as e:
@@ -169,7 +226,7 @@ async def handle_generate_ground_track(
         step_interval: Time step interval. Supports seconds, minutes, or hours. Default: 1 minute.
 
     Returns:
-        List of telemetry messages per SCHEMA.txt
+        List of telemetry messages in the server telemetry format
     """
     # Parse parameters with defaults
     start_time_dt = datetime.utcnow() if start_time is None else parse_time_input(start_time)
@@ -188,9 +245,13 @@ async def handle_generate_ground_track(
     # Generate ground track
     satellite = create_satellite_from_tle(sat_info["tle_line1"], sat_info["tle_line2"])
     ground_track = generate_ground_track(satellite, start_time_dt, end_time_dt, step_seconds)
+    footprints = [
+        calculate_footprint_from_position(lat_deg, lon_deg, alt_m)
+        for _, lat_deg, lon_deg, alt_m in ground_track
+    ]
 
     # Format response
-    return format_ground_track_response(str(sat_info["norad_id"]), ground_track, None)
+    return format_ground_track_response(str(sat_info["norad_id"]), ground_track, footprints)
 
 
 async def handle_get_satellite_info(satellite_identifier: str) -> Dict[str, Any]:
@@ -247,7 +308,8 @@ async def list_tools() -> List[Tool]:
                 "User says '1 minute steps' -> step_interval='1 minute'. "
                 "Time steps can be in seconds ('10 seconds', '30 sec'), minutes ('1 minute', '5 mins'), or hours. "
                 "If user does NOT mention time steps, default is '1 minute'. "
-                "Returns telemetry data matching SCHEMA.txt format."
+                "Supports start times like 'now', ISO-8601 timestamps, or relative phrases like 'in one hour'. "
+                "Returns telemetry data in the server telemetry format, including optional footprint geometry when available."
             ),
             inputSchema={
                 "type": "object",
@@ -305,7 +367,7 @@ async def list_tools() -> List[Tool]:
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Satellite name or partial name to search for (e.g., 'Starlink', 'GPS', 'NOAA', 'Hubble')",
+                        "description": "Satellite name or partial name to search for (e.g., 'Starlink', 'NOAA', 'Hubble', 'ISS')",
                     },
                     "limit": {
                         "type": "integer",
@@ -355,5 +417,3 @@ if __name__ == "__main__":
             await server.run(read_stream, write_stream, server.create_initialization_options())
 
     asyncio.run(run_server())
-
-

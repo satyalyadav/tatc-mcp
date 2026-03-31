@@ -190,6 +190,31 @@ def calculate_footprint(
         return None
 
 
+def calculate_footprint_from_position(
+    lat_deg: float,
+    lon_deg: float,
+    alt_m: float,
+    fov_degrees: Optional[float] = None,
+) -> Optional[List[List[float]]]:
+    """
+    Calculate a footprint polygon from an already propagated position.
+
+    Args:
+        lat_deg: Satellite latitude
+        lon_deg: Satellite longitude
+        alt_m: Satellite altitude in meters
+        fov_degrees: Field of view in degrees (default: 60 degrees)
+
+    Returns:
+        List of [lon, lat] coordinates forming the footprint polygon, or None if it fails
+    """
+    try:
+        return _calculate_circular_footprint(lat_deg, lon_deg, alt_m, fov_degrees)
+    except Exception as e:
+        print(f"Warning: Footprint calculation failed from propagated position: {e}")
+        return None
+
+
 def _calculate_circular_footprint(
     lat_deg: float,
     lon_deg: float,
@@ -229,7 +254,11 @@ def _calculate_circular_footprint(
         angle = 2 * math.pi * i / FOOTPRINT_POLYGON_POINTS
         # Calculate lat/lon offset (simplified approximation)
         dlat = footprint_radius_deg * math.cos(angle)
-        dlon = footprint_radius_deg * math.sin(angle) / math.cos(math.radians(lat_deg))
+        cos_lat = math.cos(math.radians(lat_deg))
+        if abs(cos_lat) < 1e-6:
+            dlon = 0.0
+        else:
+            dlon = footprint_radius_deg * math.sin(angle) / cos_lat
 
         # Normalize coordinates to valid ranges
         new_lat = max(-90, min(90, lat_deg + dlat))
@@ -238,5 +267,4 @@ def _calculate_circular_footprint(
         coords.append([new_lon, new_lat])
 
     return coords
-
 
