@@ -24,7 +24,7 @@ An MCP (Model Context Protocol) server that provides satellite ground track gene
 pip install -r requirements.txt
 ```
 
-The core dependency set pins `numpy<2.2` as a compatibility safeguard for environments that resolve `numba 0.61.x`, which does not support NumPy 2.2+.
+This release targets Python 3.10+ and the MCP Python SDK v2 prerelease line for the draft `2026-07-28` protocol. The SDK is pinned to `mcp==2.0.0a3` because v2 is still changing before the final protocol release. The core dependency set also pins `numpy<2.2` as a compatibility safeguard for TAT-C/Numba environments.
 
 ### Running the Server
 
@@ -32,7 +32,15 @@ The core dependency set pins `numpy<2.2` as a compatibility safeguard for enviro
 python -m tatc_mcp.server
 ```
 
-The server listens for MCP protocol messages on stdin/stdout. Configure your LLM client to run this command to use the server from the project root.
+By default, the server listens for MCP protocol messages on stdin/stdout. Configure your LLM client to run this command to use the server from the project root.
+
+For remote clients, run the stateless Streamable HTTP transport:
+
+```bash
+python -m tatc_mcp.server --transport streamable-http --host 127.0.0.1 --port 8000
+```
+
+The v2 SDK handles `server/discover`, per-request protocol metadata, and `resultType` fields for the `2026-07-28` protocol path.
 
 ## Available Tools
 
@@ -49,6 +57,8 @@ Generates ground track for a satellite.
 
 **Returns:** Array of telemetry objects with `id`, `time`, `position_lla` (lat/lon/alt), and optional `footprint_geojson` when geometry is available.
 
+MCP clients receive this as both human-readable JSON text and `structuredContent`.
+
 ### `get_satellite_info`
 
 Fetches satellite information including TLE data from CelesTrak.
@@ -58,6 +68,8 @@ Fetches satellite information including TLE data from CelesTrak.
 - `satellite_identifier` (required): Satellite name or NORAD ID
 
 **Returns:** Dictionary with `norad_id`, `name`, `tle_line1`, and `tle_line2`.
+
+MCP clients receive this as both human-readable JSON text and `structuredContent`.
 
 ### `search_satellites`
 
@@ -69,6 +81,8 @@ Search for satellites by name in the CelesTrak database.
 - `limit` (optional): Maximum results (default: 10)
 
 **Returns:** List of satellite dictionaries with NORAD ID, name, object type, country, and launch date.
+
+MCP clients receive this as both human-readable JSON text and `structuredContent`.
 
 ## Example Prompts
 
@@ -184,7 +198,7 @@ Example `mcp.json` entry for Windows + WSL:
 
 ChatGPT Developer Mode and Claude web custom connectors require a remote MCP server URL. Local STDIO servers are not enough for those web interfaces.
 
-That means this repository can be used locally today with Codex CLI, the current Codex app setup, Claude Code, and Cursor without hosting. To use it with ChatGPT web or Claude web, you first need a remote MCP transport in this project, then you need to host it at a reachable HTTPS URL. For new work, prefer HTTP or Streamable HTTP. Claude still supports SSE for remote connectors, but Anthropic documents SSE as deprecated where HTTP is available.
+That means this repository can be used locally today with Codex CLI, the current Codex app setup, Claude Code, and Cursor without hosting. To use it with ChatGPT web or Claude web, run the Streamable HTTP transport shown above and host it at a reachable HTTPS URL. SSE is not implemented here because the draft spec deprecates HTTP+SSE in favor of Streamable HTTP.
 
 ### References
 
@@ -199,7 +213,7 @@ That means this repository can be used locally today with Codex CLI, the current
 **MCP SDK Errors:**
 
 ```bash
-pip install mcp
+pip install mcp==2.0.0a3
 ```
 
 **CelesTrak API Errors:**
