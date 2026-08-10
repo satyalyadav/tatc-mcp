@@ -7,8 +7,11 @@ from typing import Any, Dict, List, Optional
 
 import anyio
 from dateutil import parser as date_parser
-import mcp_types as types
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError
+from mcp import MCPError, types
 from mcp.server import Server, ServerRequestContext
+from mcp.server.transport_security import TransportSecuritySettings
 
 from tatc_mcp.celestrak_client import get_satellite_info, search_satellites_by_name
 from tatc_mcp.schema_formatter import format_ground_track_response
@@ -20,8 +23,14 @@ from tatc_mcp.tatc_integration import (
 from tatc_mcp.validation import validate_step_interval, validate_time_range
 
 SERVER_NAME = "tatc-mcp-server"
-SERVER_VERSION = "0.2.0rc1"
+SERVER_VERSION = "0.2.0"
 TOOL_CACHE_TTL_MS = 300_000
+SERVER_INSTRUCTIONS = (
+    "Use search_satellites when a satellite name is broad or ambiguous. "
+    "Use get_satellite_info for metadata and current TLE data. "
+    "Use generate_ground_track only after resolving an exact satellite name or NORAD ID; "
+    "its times are UTC and its position altitude is in meters. All tools are read-only."
+)
 
 
 # Time unit normalization mapping
@@ -83,6 +92,7 @@ def _utcnow_naive() -> datetime:
     """Return the current UTC time as a naive datetime for TAT-C compatibility."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
+
 _GROUND_TRACK_INPUT_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -108,6 +118,7 @@ _GROUND_TRACK_INPUT_SCHEMA: Dict[str, Any] = {
         },
     },
     "required": ["satellite_identifier"],
+    "additionalProperties": False,
 }
 
 _SATELLITE_IDENTIFIER_INPUT_SCHEMA: Dict[str, Any] = {
@@ -119,6 +130,7 @@ _SATELLITE_IDENTIFIER_INPUT_SCHEMA: Dict[str, Any] = {
         }
     },
     "required": ["satellite_identifier"],
+    "additionalProperties": False,
 }
 
 _SEARCH_INPUT_SCHEMA: Dict[str, Any] = {
@@ -137,6 +149,7 @@ _SEARCH_INPUT_SCHEMA: Dict[str, Any] = {
         },
     },
     "required": ["query"],
+    "additionalProperties": False,
 }
 
 _POSITION_SCHEMA: Dict[str, Any] = {
@@ -164,13 +177,13 @@ _TELEMETRY_SCHEMA: Dict[str, Any] = {
 }
 
 _GROUND_TRACK_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "type": "array",
+    "items": _TELEMETRY_SCHEMA,
+}
+
+_LEGACY_GROUND_TRACK_OUTPUT_SCHEMA: Dict[str, Any] = {
     "type": "object",
-    "properties": {
-        "data": {
-            "type": "array",
-            "items": _TELEMETRY_SCHEMA,
-        }
-    },
+    "properties": {"data": _GROUND_TRACK_OUTPUT_SCHEMA},
     "required": ["data"],
 }
 
@@ -186,15 +199,30 @@ _SATELLITE_INFO_OUTPUT_SCHEMA: Dict[str, Any] = {
 }
 
 _SEARCH_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "type": "array",
+    "items": {"type": "object"},
+}
+
+_LEGACY_SEARCH_OUTPUT_SCHEMA: Dict[str, Any] = {
     "type": "object",
-    "properties": {
-        "data": {
-            "type": "array",
-            "items": {"type": "object"},
-        }
-    },
+    "properties": {"data": _SEARCH_OUTPUT_SCHEMA},
     "required": ["data"],
 }
+
+_TOOL_INPUT_SCHEMAS = {
+    "generate_ground_track": _GROUND_TRACK_INPUT_SCHEMA,
+    "get_satellite_info": _SATELLITE_IDENTIFIER_INPUT_SCHEMA,
+    "search_satellites": _SEARCH_INPUT_SCHEMA,
+}
+
+_READ_ONLY_ANNOTATIONS = types.ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
+
+_LOCAL_HTTP_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def _parse_time_unit(unit: str) -> Optional[str]:
@@ -358,18 +386,63 @@ async def handle_search_satellites(query: str, limit: int = 10) -> List[Dict[str
     return search_satellites_by_name(query, limit=limit)
 
 
-def _json_tool_result(result: Any) -> types.CallToolResult:
-    # MCP output schemas must have an object at their root. Keep the text
-    # representation unchanged for clients that consume it as JSON, and wrap
-    # list values only in the schema-validated structured content.
-    structured_content = {"data": result} if isinstance(result, list) else result
+def _uses_native_json_results(protocol_version: str) -> bool:
+    """Return whether the negotiated protocol permits non-object structured output."""
+    return protocol_version == "2026-07-28"
+
+
+def _json_tool_result(result: Any, protocol_version: str) -> types.CallToolResult:
+    structured_content = result
+    if isinstance(result, list) and not _uses_native_json_results(protocol_version):
+        structured_content = {"data": result}
+
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=json.dumps(result, indent=2))],
         structured_content=structured_content,
     )
 
 
-def _tools() -> List[types.Tool]:
+def _tool_error_result(tool_name: str, message: str) -> types.CallToolResult:
+    """Return an actionable tool error that an LLM can inspect and correct."""
+    return types.CallToolResult(
+        content=[
+            types.TextContent(
+                type="text", text=f"Error executing tool {tool_name}: {message}"
+            )
+        ],
+        is_error=True,
+    )
+
+
+def _transport_security_settings(
+    host: str,
+    allowed_hosts: List[str],
+    allowed_origins: List[str],
+    disable_dns_rebinding_protection: bool,
+) -> Optional[TransportSecuritySettings]:
+    """Build explicit HTTP transport protection for non-local listeners."""
+    if disable_dns_rebinding_protection:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+    if host in _LOCAL_HTTP_HOSTS:
+        # Let the SDK install its standard localhost allowlists.
+        return None
+
+    if not allowed_hosts:
+        raise ValueError(
+            "Non-local Streamable HTTP requires at least one --allowed-host "
+            "or the explicit --disable-dns-rebinding-protection override."
+        )
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
+def _tools(protocol_version: str = "2026-07-28") -> List[types.Tool]:
+    native_json_results = _uses_native_json_results(protocol_version)
     return [
         types.Tool(
             name="generate_ground_track",
@@ -381,7 +454,12 @@ def _tools() -> List[types.Tool]:
                 "optional footprint geometry."
             ),
             input_schema=_GROUND_TRACK_INPUT_SCHEMA,
-            output_schema=_GROUND_TRACK_OUTPUT_SCHEMA,
+            output_schema=(
+                _GROUND_TRACK_OUTPUT_SCHEMA
+                if native_json_results
+                else _LEGACY_GROUND_TRACK_OUTPUT_SCHEMA
+            ),
+            annotations=_READ_ONLY_ANNOTATIONS,
         ),
         types.Tool(
             name="get_satellite_info",
@@ -389,16 +467,23 @@ def _tools() -> List[types.Tool]:
             description="Get satellite metadata and TLE data from CelesTrak.",
             input_schema=_SATELLITE_IDENTIFIER_INPUT_SCHEMA,
             output_schema=_SATELLITE_INFO_OUTPUT_SCHEMA,
+            annotations=_READ_ONLY_ANNOTATIONS,
         ),
         types.Tool(
             name="search_satellites",
             title="Search Satellites",
             description=(
-                "Search for satellites by name in the CelesTrak database. Use this when the exact "
+                "Search for currently orbiting satellites by name in the CelesTrak database. "
+                "Decayed objects without current TLE data are excluded. Use this when the exact "
                 "satellite name or NORAD ID is unknown."
             ),
             input_schema=_SEARCH_INPUT_SCHEMA,
-            output_schema=_SEARCH_OUTPUT_SCHEMA,
+            output_schema=(
+                _SEARCH_OUTPUT_SCHEMA
+                if native_json_results
+                else _LEGACY_SEARCH_OUTPUT_SCHEMA
+            ),
+            annotations=_READ_ONLY_ANNOTATIONS,
         ),
     ]
 
@@ -408,7 +493,7 @@ async def list_tools(
 ) -> types.ListToolsResult:
     """List available tools in deterministic order with cache hints."""
     return types.ListToolsResult(
-        tools=_tools(),
+        tools=_tools(ctx.protocol_version),
         ttl_ms=TOOL_CACHE_TTL_MS,
         cache_scope="public",
     )
@@ -420,29 +505,37 @@ async def call_tool(
     """Handle MCP tool calls."""
     arguments = params.arguments or {}
 
-    if params.name == "generate_ground_track":
-        result = await handle_generate_ground_track(
-            satellite_identifier=arguments.get("satellite_identifier"),
-            start_time=arguments.get("start_time"),
-            duration=arguments.get("duration"),
-            step_interval=arguments.get("step_interval"),
+    schema = _TOOL_INPUT_SCHEMAS.get(params.name)
+    if schema is None:
+        raise MCPError(
+            code=types.INVALID_PARAMS, message=f"Unknown tool: {params.name}"
         )
-        return _json_tool_result(result)
 
-    if params.name == "get_satellite_info":
-        result = await handle_get_satellite_info(
-            satellite_identifier=arguments.get("satellite_identifier")
-        )
-        return _json_tool_result(result)
+    try:
+        Draft202012Validator(schema).validate(arguments)
+    except ValidationError as exc:
+        return _tool_error_result(params.name, f"Invalid arguments: {exc.message}")
 
-    if params.name == "search_satellites":
-        result = await handle_search_satellites(
-            query=arguments.get("query"),
-            limit=arguments.get("limit", 10),
-        )
-        return _json_tool_result(result)
-
-    raise ValueError(f"Unknown tool: {params.name}")
+    try:
+        if params.name == "generate_ground_track":
+            result = await handle_generate_ground_track(
+                satellite_identifier=arguments["satellite_identifier"],
+                start_time=arguments.get("start_time"),
+                duration=arguments.get("duration"),
+                step_interval=arguments.get("step_interval"),
+            )
+        elif params.name == "get_satellite_info":
+            result = await handle_get_satellite_info(
+                satellite_identifier=arguments["satellite_identifier"]
+            )
+        else:
+            result = await handle_search_satellites(
+                query=arguments["query"],
+                limit=arguments.get("limit", 10),
+            )
+        return _json_tool_result(result, ctx.protocol_version)
+    except Exception as exc:
+        return _tool_error_result(params.name, str(exc))
 
 
 server = Server(
@@ -450,6 +543,7 @@ server = Server(
     version=SERVER_VERSION,
     title="TAT-C MCP Server",
     description="Satellite metadata lookup and TAT-C ground track generation tools.",
+    instructions=SERVER_INSTRUCTIONS,
     on_list_tools=list_tools,
     on_call_tool=call_tool,
 )
@@ -481,16 +575,53 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Use JSON responses for streamable HTTP instead of response streams.",
     )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        help=(
+            "Allowed Host header for non-local Streamable HTTP. Repeat for multiple "
+            "values; a ':*' suffix allows any port."
+        ),
+    )
+    parser.add_argument(
+        "--allowed-origin",
+        action="append",
+        default=[],
+        help=(
+            "Allowed Origin header for non-local Streamable HTTP. Repeat for multiple "
+            "browser origins; requests without Origin remain valid."
+        ),
+    )
+    parser.add_argument(
+        "--disable-dns-rebinding-protection",
+        action="store_true",
+        help=(
+            "Explicitly disable Host/Origin validation. Only use behind a trusted "
+            "reverse proxy that performs equivalent checks."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.transport == "streamable-http":
         import uvicorn
+
+        try:
+            transport_security = _transport_security_settings(
+                args.host,
+                args.allowed_host,
+                args.allowed_origin,
+                args.disable_dns_rebinding_protection,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
 
         uvicorn.run(
             server.streamable_http_app(
                 stateless_http=True,
                 json_response=args.json_response,
                 host=args.host,
+                transport_security=transport_security,
             ),
             host=args.host,
             port=args.port,

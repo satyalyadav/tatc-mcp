@@ -21,3 +21,47 @@ def test_fetch_tle_requests_tle_format_and_parses_three_lines(monkeypatch):
     monkeypatch.setattr(celestrak_client.requests, "get", fake_get)
 
     assert celestrak_client.fetch_tle(25544) == (line1, line2)
+
+
+def test_satcat_search_skips_decayed_objects_before_applying_limit(monkeypatch):
+    records = [
+        {
+            "OBJECT_NAME": "STARLINK-31",
+            "NORAD_CAT_ID": 44235,
+            "OBJECT_TYPE": "PAY",
+            "OWNER": "US",
+            "LAUNCH_DATE": "2019-05-24",
+            "DECAY_DATE": "2020-10-01",
+        },
+        {
+            "OBJECT_NAME": "STARLINK-1008",
+            "NORAD_CAT_ID": 44714,
+            "OBJECT_TYPE": "PAY",
+            "OWNER": "US",
+            "LAUNCH_DATE": "2019-11-11",
+            "DECAY_DATE": "",
+        },
+    ]
+
+    class FakeResponse:
+        text = "not empty"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return records
+
+    monkeypatch.setattr(
+        celestrak_client.requests, "get", lambda *args, **kwargs: FakeResponse()
+    )
+
+    assert celestrak_client._fetch_satcat_records("STARLINK", limit=1) == [
+        {
+            "norad_id": 44714,
+            "name": "STARLINK-1008",
+            "object_type": "PAY",
+            "country": "US",
+            "launch_date": "2019-11-11",
+        }
+    ]

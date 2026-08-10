@@ -1,6 +1,7 @@
 # MCP Server dependencies
 numpy<2.2
-mcp==2.0.0a3
+mcp==2.0.0
+jsonschema>=4.20.0
 requests>=2.31.0
 python-dateutil>=2.8.2
 tatc>=3.4.10

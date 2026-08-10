@@ -24,7 +24,7 @@ An MCP (Model Context Protocol) server that provides satellite ground track gene
 pip install -r requirements.txt
 ```
 
-This release targets Python 3.10+ and the MCP Python SDK v2 prerelease line for the draft `2026-07-28` protocol. The SDK is pinned to `mcp==2.0.0a3` because v2 is still changing before the final protocol release. The core dependency set also pins `numpy<2.2` as a compatibility safeguard for TAT-C/Numba environments.
+This release targets Python 3.10+, the final `2026-07-28` MCP specification, and the stable MCP Python SDK `mcp==2.0.0`. The core dependency set also pins `numpy<2.2` as a compatibility safeguard for TAT-C/Numba environments.
 
 ### Running the Server
 
@@ -40,7 +40,20 @@ For remote clients, run the stateless Streamable HTTP transport:
 python -m tatc_mcp.server --transport streamable-http --host 127.0.0.1 --port 8000
 ```
 
-The v2 SDK handles `server/discover`, per-request protocol metadata, and `resultType` fields for the `2026-07-28` protocol path.
+The v2 SDK handles `server/discover`, per-request protocol metadata, `resultType` fields, required Streamable HTTP routing headers, and backwards compatibility with pre-2026 clients. The server advertises native array schemas/content to 2026 clients and automatically uses an object-root `{ "data": [...] }` compatibility envelope for older clients. The HTTP server uses the sessionless `2026-07-28` path and configures the legacy path as stateless because these tools do not need a server-to-client backchannel.
+
+For a public listener, explicitly allow the externally visible Host header (and any browser Origin that will call it):
+
+```bash
+python -m tatc_mcp.server \
+  --transport streamable-http \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --allowed-host mcp.example.com \
+  --allowed-origin https://chat.example.com
+```
+
+Non-local listeners fail closed without `--allowed-host`. The escape hatch `--disable-dns-rebinding-protection` is intended only for a trusted reverse proxy that enforces equivalent Host and Origin checks. Public deployments should also terminate TLS and enforce authentication at the application or proxy layer.
 
 ## Available Tools
 
@@ -57,7 +70,7 @@ Generates ground track for a satellite.
 
 **Returns:** Array of telemetry objects with `id`, `time`, `position_lla` (lat/lon/alt), and optional `footprint_geojson` when geometry is available.
 
-MCP clients receive this as both human-readable JSON text and `structuredContent`.
+MCP clients receive this as both human-readable JSON text and array-valued `structuredContent`.
 
 ### `get_satellite_info`
 
@@ -69,11 +82,11 @@ Fetches satellite information including TLE data from CelesTrak.
 
 **Returns:** Dictionary with `norad_id`, `name`, `tle_line1`, and `tle_line2`.
 
-MCP clients receive this as both human-readable JSON text and `structuredContent`.
+MCP clients receive this as both human-readable JSON text and object-valued `structuredContent`.
 
 ### `search_satellites`
 
-Search for satellites by name in the CelesTrak database.
+Search for currently orbiting satellites by name in the CelesTrak database. Historical objects with a recorded decay date are omitted so returned IDs can be passed to the TLE-backed tools.
 
 **Parameters:**
 
@@ -82,7 +95,7 @@ Search for satellites by name in the CelesTrak database.
 
 **Returns:** List of satellite dictionaries with NORAD ID, name, object type, country, and launch date.
 
-MCP clients receive this as both human-readable JSON text and `structuredContent`.
+MCP clients receive this as both human-readable JSON text and array-valued `structuredContent`.
 
 ## Example Prompts
 
@@ -101,7 +114,7 @@ The server supports:
 
 ## Output Format
 
-The server returns an array of telemetry objects shaped like:
+The server returns an array. Each telemetry object is shaped like:
 
 ```json
 {
@@ -140,7 +153,12 @@ args = ["bash", "-lc", "cd /home/satyal/tatc-mcp && python3 -m tatc_mcp.server"]
 startup_timeout_sec = 30
 tool_timeout_sec = 120
 enabled = true
+
+[features]
+mcp_2026_07_28 = true
 ```
+
+In Codex CLI builds where the new protocol is still marked under development, the feature entry above (or `codex --enable mcp_2026_07_28`) is required to negotiate the new stateless protocol. Without it, this server still serves Codex through the legacy handshake path and uses legacy-compatible object-root output envelopes.
 
 You can also add the same server from the CLI:
 
@@ -213,7 +231,7 @@ That means this repository can be used locally today with Codex CLI, the current
 **MCP SDK Errors:**
 
 ```bash
-pip install mcp==2.0.0a3
+pip install mcp==2.0.0
 ```
 
 **CelesTrak API Errors:**
@@ -231,3 +249,18 @@ This project uses the TAT-C library (BSD-3-Clause). See the [TAT-C repository](h
 - **TAT-C Library**: [code-lab-org/tatc](https://github.com/code-lab-org/tatc)
 - **CelesTrak**: [celestrak.org](https://celestrak.org)
 - **MCP Protocol**: Model Context Protocol by Anthropic
+
+## MCP 2026-07-28 Compatibility
+
+The project was audited against the final protocol and stable Python SDK, not only the earlier beta announcement. The implementation uses the stateless 2026 protocol path, native array-valued structured output, deterministic cached tool discovery, read-only tool annotations, strict JSON Schema input validation, and model-visible execution errors.
+
+Features such as Tasks, elicitation, prompts, resources, subscriptions, and server-to-client requests are intentionally not advertised because the current satellite tools are short, synchronous, and read-only. They can be added later without changing the core tools contract.
+
+Official sources used for the audit:
+
+- [MCP 2026-07-28 final release](https://blog.modelcontextprotocol.io/posts/2026-07-28/)
+- [MCP 2026-07-28 tools specification](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)
+- [Python SDK v2 migration guide](https://py.sdk.modelcontextprotocol.io/migration/)
+- [Python SDK low-level server guide](https://py.sdk.modelcontextprotocol.io/advanced/low-level-server/)
+- [Python SDK deployment and transport security](https://py.sdk.modelcontextprotocol.io/run/deploy/)
+- [Official MCP conformance suite](https://github.com/modelcontextprotocol/conformance)

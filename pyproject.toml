@@ -1,12 +1,13 @@
 [project]
 name = "tatc-mcp"
-version = "0.2.0rc1"
+version = "0.2.0"
 description = "MCP server for satellite ground track generation using TAT-C"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy<2.2",
-    "mcp==2.0.0a3",
+    "mcp==2.0.0",
+    "jsonschema>=4.20.0",
     "requests>=2.31.0",
     "python-dateutil>=2.8.2",
     "tatc>=3.4.10",
