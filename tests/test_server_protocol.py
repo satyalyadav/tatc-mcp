@@ -29,6 +29,9 @@ def test_modern_client_discovers_tools():
                 tool.input_schema["type"] == "object" for tool in tools_result.tools
             )
             assert all(tool.output_schema is not None for tool in tools_result.tools)
+            assert all(
+                tool.output_schema["type"] == "object" for tool in tools_result.tools
+            )
 
     run(scenario())
 
@@ -55,7 +58,7 @@ def test_search_satellites_returns_structured_content(monkeypatch):
             )
 
             assert result.result_type == "complete"
-            assert result.structured_content == expected
+            assert result.structured_content == {"data": expected}
             assert json.loads(result.content[0].text) == expected
 
     run(scenario())
@@ -100,8 +103,7 @@ def test_generate_ground_track_returns_telemetry_structured_content(monkeypatch)
                 },
             )
 
-            telemetry = result.structured_content
-            assert telemetry == [
+            telemetry = [
                 {
                     "id": "25544",
                     "time": "2026-01-01T00:00:00Z",
@@ -112,6 +114,7 @@ def test_generate_ground_track_returns_telemetry_structured_content(monkeypatch)
                     },
                 }
             ]
+            assert result.structured_content == {"data": telemetry}
             assert json.loads(result.content[0].text) == telemetry
 
     run(scenario())

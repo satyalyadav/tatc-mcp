@@ -235,12 +235,12 @@ def fetch_tle(norad_id: int) -> Tuple[str, str]:
     # Validate NORAD ID
     norad_id = validate_norad_id(norad_id)
 
-    # Don't use FORMAT=tle parameter - it causes 403 errors
-    # The default format is TLE, so we don't need to specify it
+    # CelesTrak defaults GP queries to CSV, so request the legacy three-line
+    # TLE representation explicitly. The parser below also accepts 2LE data.
     try:
         response = requests.get(
             GP_TLE_URL,
-            params={"CATNR": norad_id},
+            params={"CATNR": norad_id, "FORMAT": "TLE"},
             allow_redirects=True,
             timeout=10,
         )

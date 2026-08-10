@@ -78,6 +78,11 @@ _WORD_NUMBERS = {
     "ninety": 90,
 }
 
+
+def _utcnow_naive() -> datetime:
+    """Return the current UTC time as a naive datetime for TAT-C compatibility."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 _GROUND_TRACK_INPUT_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -159,8 +164,14 @@ _TELEMETRY_SCHEMA: Dict[str, Any] = {
 }
 
 _GROUND_TRACK_OUTPUT_SCHEMA: Dict[str, Any] = {
-    "type": "array",
-    "items": _TELEMETRY_SCHEMA,
+    "type": "object",
+    "properties": {
+        "data": {
+            "type": "array",
+            "items": _TELEMETRY_SCHEMA,
+        }
+    },
+    "required": ["data"],
 }
 
 _SATELLITE_INFO_OUTPUT_SCHEMA: Dict[str, Any] = {
@@ -175,8 +186,14 @@ _SATELLITE_INFO_OUTPUT_SCHEMA: Dict[str, Any] = {
 }
 
 _SEARCH_OUTPUT_SCHEMA: Dict[str, Any] = {
-    "type": "array",
-    "items": {"type": "object"},
+    "type": "object",
+    "properties": {
+        "data": {
+            "type": "array",
+            "items": {"type": "object"},
+        }
+    },
+    "required": ["data"],
 }
 
 
@@ -231,7 +248,7 @@ def _parse_relative_time(time_str: str) -> Optional[datetime]:
         if not unit:
             return None
 
-        return datetime.utcnow() + _unit_to_timedelta(unit, amount)
+        return _utcnow_naive() + _unit_to_timedelta(unit, amount)
     except (ValueError, IndexError):
         return None
 
@@ -246,7 +263,7 @@ def parse_time_input(time_str: str) -> datetime:
     normalized = time_str.strip().lower()
 
     if normalized in ("now", "current"):
-        return datetime.utcnow()
+        return _utcnow_naive()
 
     relative = _parse_relative_time(normalized)
     if relative:
@@ -297,7 +314,7 @@ async def handle_generate_ground_track(
 ) -> List[Dict[str, Any]]:
     """Generate ground track telemetry for a satellite."""
     start_time_dt = (
-        datetime.utcnow() if start_time is None else parse_time_input(start_time)
+        _utcnow_naive() if start_time is None else parse_time_input(start_time)
     )
     duration_delta = (
         timedelta(hours=1) if duration is None else parse_duration(duration)
@@ -342,9 +359,13 @@ async def handle_search_satellites(query: str, limit: int = 10) -> List[Dict[str
 
 
 def _json_tool_result(result: Any) -> types.CallToolResult:
+    # MCP output schemas must have an object at their root. Keep the text
+    # representation unchanged for clients that consume it as JSON, and wrap
+    # list values only in the schema-validated structured content.
+    structured_content = {"data": result} if isinstance(result, list) else result
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=json.dumps(result, indent=2))],
-        structured_content=result,
+        structured_content=structured_content,
     )
 
 
