@@ -1,35 +1,38 @@
 """MCP server for satellite ground track generation using TAT-C."""
 
-import asyncio
+import argparse
 import json
-import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional, List, Dict, Callable
+from typing import Any, Dict, List, Optional
 
+import anyio
 from dateutil import parser as date_parser
-
-try:
-    from mcp.server import Server
-    from mcp.server.stdio import stdio_server
-    from mcp.types import Tool, TextContent
-except ImportError:
-    print("Error: MCP SDK is not installed. Install with: pip install mcp", file=sys.stderr)
-    sys.exit(1)
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError
+from mcp import MCPError, types
+from mcp.server import Server, ServerRequestContext
+from mcp.server.transport_security import TransportSecuritySettings
 
 from tatc_mcp.celestrak_client import get_satellite_info, search_satellites_by_name
+from tatc_mcp.schema_formatter import format_ground_track_response
 from tatc_mcp.tatc_integration import (
+    calculate_footprint_from_position,
     create_satellite_from_tle,
     generate_ground_track,
-    calculate_footprint_from_position,
 )
-from tatc_mcp.schema_formatter import format_ground_track_response
-from tatc_mcp.validation import validate_time_range, validate_step_interval
+from tatc_mcp.validation import validate_step_interval, validate_time_range
 
-# Initialize server
-server = Server("tatc-mcp-server")
+SERVER_NAME = "tatc-mcp-server"
+SERVER_VERSION = "0.2.0"
+TOOL_CACHE_TTL_MS = 300_000
+SERVER_INSTRUCTIONS = (
+    "Use search_satellites when a satellite name is broad or ambiguous. "
+    "Use get_satellite_info for metadata and current TLE data. "
+    "Use generate_ground_track only after resolving an exact satellite name or NORAD ID; "
+    "its times are UTC and its position altitude is in meters. All tools are read-only."
+)
 
 
-# Time parsing utilities
 # Time unit normalization mapping
 _TIME_UNITS = {
     "second": "seconds",
@@ -44,7 +47,6 @@ _TIME_UNITS = {
     "day": "days",
 }
 
-# Time unit to timedelta parameter mapping
 _UNIT_TO_DELTA = {
     "seconds": lambda amount: timedelta(seconds=amount),
     "minutes": lambda amount: timedelta(minutes=amount),
@@ -86,9 +88,149 @@ _WORD_NUMBERS = {
 }
 
 
+def _utcnow_naive() -> datetime:
+    """Return the current UTC time as a naive datetime for TAT-C compatibility."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+_GROUND_TRACK_INPUT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "satellite_identifier": {
+            "type": "string",
+            "description": "Satellite name (e.g., 'ISS', 'Hubble') or NORAD ID",
+        },
+        "start_time": {
+            "type": "string",
+            "description": "Start time (ISO-8601 or 'now', default: now)",
+        },
+        "duration": {
+            "type": "string",
+            "description": "Duration (e.g., '1 hour', '60 minutes', default: 1 hour)",
+        },
+        "step_interval": {
+            "type": "string",
+            "description": (
+                "Time step interval between data points. Use this whenever the user specifies "
+                "steps or intervals, such as '10 seconds', '30 sec', '1 minute', or '5 mins'. "
+                "Default: '1 minute' only if the user does not specify any time step."
+            ),
+        },
+    },
+    "required": ["satellite_identifier"],
+    "additionalProperties": False,
+}
+
+_SATELLITE_IDENTIFIER_INPUT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "satellite_identifier": {
+            "type": "string",
+            "description": "Satellite name (e.g., 'ISS') or NORAD ID",
+        }
+    },
+    "required": ["satellite_identifier"],
+    "additionalProperties": False,
+}
+
+_SEARCH_INPUT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": "Satellite name or partial name to search for",
+        },
+        "limit": {
+            "type": "integer",
+            "description": "Maximum number of results to return",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 50,
+        },
+    },
+    "required": ["query"],
+    "additionalProperties": False,
+}
+
+_POSITION_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "lat_deg": {"type": "number"},
+        "lon_deg": {"type": "number"},
+        "alt_m": {"type": "number"},
+    },
+    "required": ["lat_deg", "lon_deg", "alt_m"],
+}
+
+_TELEMETRY_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string"},
+        "time": {"type": "string", "format": "date-time"},
+        "position_lla": _POSITION_SCHEMA,
+        "lookpoint_lla": _POSITION_SCHEMA,
+        "footprint_geojson": {"type": "object"},
+        "state_flags": {"type": "array", "items": {"type": "string"}},
+        "trajectory_batches": {"type": "array", "items": {"type": "object"}},
+    },
+    "required": ["id", "time", "position_lla"],
+}
+
+_GROUND_TRACK_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "type": "array",
+    "items": _TELEMETRY_SCHEMA,
+}
+
+_LEGACY_GROUND_TRACK_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {"data": _GROUND_TRACK_OUTPUT_SCHEMA},
+    "required": ["data"],
+}
+
+_SATELLITE_INFO_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "norad_id": {"type": ["integer", "string"]},
+        "name": {"type": "string"},
+        "tle_line1": {"type": "string"},
+        "tle_line2": {"type": "string"},
+    },
+    "required": ["norad_id", "name", "tle_line1", "tle_line2"],
+}
+
+_SEARCH_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "type": "array",
+    "items": {"type": "object"},
+}
+
+_LEGACY_SEARCH_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {"data": _SEARCH_OUTPUT_SCHEMA},
+    "required": ["data"],
+}
+
+_TOOL_INPUT_SCHEMAS = {
+    "generate_ground_track": _GROUND_TRACK_INPUT_SCHEMA,
+    "get_satellite_info": _SATELLITE_IDENTIFIER_INPUT_SCHEMA,
+    "search_satellites": _SEARCH_INPUT_SCHEMA,
+}
+
+_READ_ONLY_ANNOTATIONS = types.ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
+
+_LOCAL_HTTP_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
 def _parse_time_unit(unit: str) -> Optional[str]:
     """Normalize time unit string."""
-    return _TIME_UNITS.get(unit.lower(), unit.lower() if unit.lower() in _UNIT_TO_DELTA else None)
+    normalized = unit.lower()
+    return _TIME_UNITS.get(
+        normalized, normalized if normalized in _UNIT_TO_DELTA else None
+    )
 
 
 def _unit_to_timedelta(unit: str, amount: float) -> timedelta:
@@ -134,69 +276,49 @@ def _parse_relative_time(time_str: str) -> Optional[datetime]:
         if not unit:
             return None
 
-        return datetime.utcnow() + _unit_to_timedelta(unit, amount)
+        return _utcnow_naive() + _unit_to_timedelta(unit, amount)
     except (ValueError, IndexError):
         return None
 
 
 def parse_time_input(time_str: str) -> datetime:
     """
-    Parse time input string to datetime.
+    Parse a time input string to a naive UTC datetime.
 
-    Supports:
-    - ISO-8601 format
-    - Relative times like "now", "in 1 hour"
-    - Natural language (via dateutil)
-
-    Args:
-        time_str: Time string to parse
-
-    Returns:
-        datetime object (UTC, naive)
+    Supports ISO-8601 format, "now", "current", and relative expressions like
+    "in 1 hour" or "in one hour".
     """
-    time_str = time_str.strip().lower()
+    normalized = time_str.strip().lower()
 
-    if time_str in ("now", "current"):
-        return datetime.utcnow()
+    if normalized in ("now", "current"):
+        return _utcnow_naive()
 
-    # Try relative time parsing
-    relative = _parse_relative_time(time_str)
+    relative = _parse_relative_time(normalized)
     if relative:
         return relative
 
-    # Use dateutil for more complex parsing
     try:
-        dt = date_parser.parse(time_str)
+        dt = date_parser.parse(normalized)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         else:
             dt = dt.astimezone(timezone.utc)
-        return dt.replace(tzinfo=None)  # Return naive UTC for compatibility
-    except Exception as e:
-        raise ValueError(f"Could not parse time string '{time_str}': {e}")
+        return dt.replace(tzinfo=None)
+    except Exception as exc:
+        raise ValueError(f"Could not parse time string '{time_str}': {exc}") from exc
 
 
 def parse_duration(duration_str: str) -> timedelta:
-    """
-    Parse duration string to timedelta.
+    """Parse a duration string such as "1 hour", "one hour", or "60 minutes"."""
+    normalized = duration_str.strip().lower()
 
-    Args:
-        duration_str: Duration string (e.g., "1 hour", "60 minutes")
-
-    Returns:
-        timedelta object
-    """
-    duration_str = duration_str.strip().lower()
-
-    # Try to parse as number (assume minutes)
     try:
-        return timedelta(minutes=int(duration_str))
+        return timedelta(minutes=int(normalized))
     except ValueError:
         pass
 
-    # Parse with units
     try:
-        parts = duration_str.split()
+        parts = normalized.split()
         if len(parts) < 2:
             raise ValueError("Duration must include a unit")
 
@@ -206,8 +328,10 @@ def parse_duration(duration_str: str) -> timedelta:
             raise ValueError(f"Unknown time unit: {parts[-1]}")
 
         return _unit_to_timedelta(unit, amount)
-    except (ValueError, IndexError) as e:
-        raise ValueError(f"Could not parse duration string '{duration_str}': {e}")
+    except (ValueError, IndexError) as exc:
+        raise ValueError(
+            f"Could not parse duration string '{duration_str}': {exc}"
+        ) from exc
 
 
 async def handle_generate_ground_track(
@@ -216,54 +340,38 @@ async def handle_generate_ground_track(
     duration: Optional[str] = None,
     step_interval: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Generate ground track for a satellite.
-
-    Args:
-        satellite_identifier: Satellite name or NORAD ID
-        start_time: Start time (default: now)
-        duration: Duration (default: 1 hour)
-        step_interval: Time step interval. Supports seconds, minutes, or hours. Default: 1 minute.
-
-    Returns:
-        List of telemetry messages in the server telemetry format
-    """
-    # Parse parameters with defaults
-    start_time_dt = datetime.utcnow() if start_time is None else parse_time_input(start_time)
-    duration_delta = timedelta(hours=1) if duration is None else parse_duration(duration)
-    step_seconds = 60.0 if step_interval is None else parse_duration(step_interval).total_seconds()
+    """Generate ground track telemetry for a satellite."""
+    start_time_dt = (
+        _utcnow_naive() if start_time is None else parse_time_input(start_time)
+    )
+    duration_delta = (
+        timedelta(hours=1) if duration is None else parse_duration(duration)
+    )
+    step_seconds = (
+        60.0 if step_interval is None else parse_duration(step_interval).total_seconds()
+    )
 
     end_time_dt = start_time_dt + duration_delta
-
-    # Validate
     start_time_dt, end_time_dt = validate_time_range(start_time_dt, end_time_dt)
     step_seconds = validate_step_interval(step_seconds)
 
-    # Get satellite info
     sat_info = get_satellite_info(satellite_identifier)
-
-    # Generate ground track
     satellite = create_satellite_from_tle(sat_info["tle_line1"], sat_info["tle_line2"])
-    ground_track = generate_ground_track(satellite, start_time_dt, end_time_dt, step_seconds)
+    ground_track = generate_ground_track(
+        satellite, start_time_dt, end_time_dt, step_seconds
+    )
     footprints = [
         calculate_footprint_from_position(lat_deg, lon_deg, alt_m)
         for _, lat_deg, lon_deg, alt_m in ground_track
     ]
 
-    # Format response
-    return format_ground_track_response(str(sat_info["norad_id"]), ground_track, footprints)
+    return format_ground_track_response(
+        str(sat_info["norad_id"]), ground_track, footprints
+    )
 
 
 async def handle_get_satellite_info(satellite_identifier: str) -> Dict[str, Any]:
-    """
-    Get satellite information including TLE data.
-
-    Args:
-        satellite_identifier: Satellite name or NORAD ID
-
-    Returns:
-        Dictionary with satellite information
-    """
+    """Get satellite information including TLE data."""
     info = get_satellite_info(satellite_identifier)
     return {
         "norad_id": info["norad_id"],
@@ -274,146 +382,255 @@ async def handle_get_satellite_info(satellite_identifier: str) -> Dict[str, Any]
 
 
 async def handle_search_satellites(query: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """
-    Search for satellites by name.
-
-    Args:
-        query: Satellite name or partial name to search for
-        limit: Maximum number of results (default: 10)
-
-    Returns:
-        List of satellite dictionaries with NORAD ID, name, and metadata
-    """
+    """Search for satellites by name."""
     return search_satellites_by_name(query, limit=limit)
 
 
-def _format_result(result: Any) -> List[TextContent]:
-    """Format result as JSON TextContent."""
-    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+def _uses_native_json_results(protocol_version: str) -> bool:
+    """Return whether the negotiated protocol permits non-object structured output."""
+    return protocol_version == "2026-07-28"
 
 
-# Register tools
-@server.list_tools()
-async def list_tools() -> List[Tool]:
-    """List available tools."""
-    tools = [
-        Tool(
+def _json_tool_result(result: Any, protocol_version: str) -> types.CallToolResult:
+    structured_content = result
+    if isinstance(result, list) and not _uses_native_json_results(protocol_version):
+        structured_content = {"data": result}
+
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=json.dumps(result, indent=2))],
+        structured_content=structured_content,
+    )
+
+
+def _tool_error_result(tool_name: str, message: str) -> types.CallToolResult:
+    """Return an actionable tool error that an LLM can inspect and correct."""
+    return types.CallToolResult(
+        content=[
+            types.TextContent(
+                type="text", text=f"Error executing tool {tool_name}: {message}"
+            )
+        ],
+        is_error=True,
+    )
+
+
+def _transport_security_settings(
+    host: str,
+    allowed_hosts: List[str],
+    allowed_origins: List[str],
+    disable_dns_rebinding_protection: bool,
+) -> Optional[TransportSecuritySettings]:
+    """Build explicit HTTP transport protection for non-local listeners."""
+    if disable_dns_rebinding_protection:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+    if host in _LOCAL_HTTP_HOSTS:
+        # Let the SDK install its standard localhost allowlists.
+        return None
+
+    if not allowed_hosts:
+        raise ValueError(
+            "Non-local Streamable HTTP requires at least one --allowed-host "
+            "or the explicit --disable-dns-rebinding-protection override."
+        )
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
+def _tools(protocol_version: str = "2026-07-28") -> List[types.Tool]:
+    native_json_results = _uses_native_json_results(protocol_version)
+    return [
+        types.Tool(
             name="generate_ground_track",
+            title="Generate Ground Track",
             description=(
-                "Generate ground track for a satellite over a specified time period with configurable time steps. "
-                "CRITICAL: When user mentions time steps (e.g., '10 second steps', 'every 30 seconds', '1 minute intervals', '10 sec time step'), "
-                "you MUST extract and include the step_interval parameter. Examples: "
-                "User says '10 second time steps' -> step_interval='10 seconds', "
-                "User says 'every 30 sec' -> step_interval='30 sec', "
-                "User says '1 minute steps' -> step_interval='1 minute'. "
-                "Time steps can be in seconds ('10 seconds', '30 sec'), minutes ('1 minute', '5 mins'), or hours. "
-                "If user does NOT mention time steps, default is '1 minute'. "
-                "Supports start times like 'now', ISO-8601 timestamps, or relative phrases like 'in one hour'. "
-                "Returns telemetry data in the server telemetry format, including optional footprint geometry when available."
+                "Generate ground track for a satellite over a specified time period with configurable "
+                "time steps. Supports start times like 'now', ISO-8601 timestamps, or relative "
+                "phrases like 'in one hour'. Returns telemetry objects with position_lla and "
+                "optional footprint geometry."
             ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "satellite_identifier": {
-                        "type": "string",
-                        "description": "Satellite name (e.g., 'ISS', 'Hubble') or NORAD ID",
-                    },
-                    "start_time": {
-                        "type": "string",
-                        "description": "Start time (ISO-8601 or 'now', default: now)",
-                    },
-                    "duration": {
-                        "type": "string",
-                        "description": "Duration (e.g., '1 hour', '60 minutes', default: 1 hour)",
-                    },
-                    "step_interval": {
-                        "type": "string",
-                        "description": (
-                            "REQUIRED when user specifies a time step. Time step interval between data points. "
-                            "Supports: seconds ('10 seconds', '30 sec', '10 sec'), minutes ('1 minute', '5 mins', '1 min'), or hours ('1 hour'). "
-                            "Examples: '10 seconds', '30 sec', '1 minute', '5 mins', '1 hour'. "
-                            "If user says '10 second time step' or 'every 10 seconds', use '10 seconds'. "
-                            "If user says '1 minute steps' or 'every minute', use '1 minute'. "
-                            "Default: '1 minute' only if user does not specify any time step."
-                        ),
-                    },
-                },
-                "required": ["satellite_identifier"],
-            },
+            input_schema=_GROUND_TRACK_INPUT_SCHEMA,
+            output_schema=(
+                _GROUND_TRACK_OUTPUT_SCHEMA
+                if native_json_results
+                else _LEGACY_GROUND_TRACK_OUTPUT_SCHEMA
+            ),
+            annotations=_READ_ONLY_ANNOTATIONS,
         ),
-        Tool(
+        types.Tool(
             name="get_satellite_info",
-            description="Get satellite information including TLE data from CelesTrak.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "satellite_identifier": {
-                        "type": "string",
-                        "description": "Satellite name (e.g., 'ISS') or NORAD ID",
-                    }
-                },
-                "required": ["satellite_identifier"],
-            },
+            title="Get Satellite Info",
+            description="Get satellite metadata and TLE data from CelesTrak.",
+            input_schema=_SATELLITE_IDENTIFIER_INPUT_SCHEMA,
+            output_schema=_SATELLITE_INFO_OUTPUT_SCHEMA,
+            annotations=_READ_ONLY_ANNOTATIONS,
         ),
-        Tool(
+        types.Tool(
             name="search_satellites",
+            title="Search Satellites",
             description=(
-                "Search for satellites by name in the CelesTrak database. "
-                "Useful when you don't know the exact satellite name or NORAD ID. "
-                "Returns a list of matching satellites with their NORAD IDs."
+                "Search for currently orbiting satellites by name in the CelesTrak database. "
+                "Decayed objects without current TLE data are excluded. Use this when the exact "
+                "satellite name or NORAD ID is unknown."
             ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Satellite name or partial name to search for (e.g., 'Starlink', 'NOAA', 'Hubble', 'ISS')",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return (default: 10, max recommended: 50)",
-                        "default": 10,
-                    },
-                },
-                "required": ["query"],
-            },
+            input_schema=_SEARCH_INPUT_SCHEMA,
+            output_schema=(
+                _SEARCH_OUTPUT_SCHEMA
+                if native_json_results
+                else _LEGACY_SEARCH_OUTPUT_SCHEMA
+            ),
+            annotations=_READ_ONLY_ANNOTATIONS,
         ),
     ]
 
-    return tools
+
+async def list_tools(
+    ctx: ServerRequestContext, params: types.PaginatedRequestParams | None
+) -> types.ListToolsResult:
+    """List available tools in deterministic order with cache hints."""
+    return types.ListToolsResult(
+        tools=_tools(ctx.protocol_version),
+        ttl_ms=TOOL_CACHE_TTL_MS,
+        cache_scope="public",
+    )
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
-    """Handle tool calls."""
-    handlers: Dict[str, Callable[[], Any]] = {
-        "generate_ground_track": lambda: handle_generate_ground_track(
-            satellite_identifier=arguments.get("satellite_identifier"),
-            start_time=arguments.get("start_time"),
-            duration=arguments.get("duration"),
-            step_interval=arguments.get("step_interval"),
+async def call_tool(
+    ctx: ServerRequestContext, params: types.CallToolRequestParams
+) -> types.CallToolResult:
+    """Handle MCP tool calls."""
+    arguments = params.arguments or {}
+
+    schema = _TOOL_INPUT_SCHEMAS.get(params.name)
+    if schema is None:
+        raise MCPError(
+            code=types.INVALID_PARAMS, message=f"Unknown tool: {params.name}"
+        )
+
+    try:
+        Draft202012Validator(schema).validate(arguments)
+    except ValidationError as exc:
+        return _tool_error_result(params.name, f"Invalid arguments: {exc.message}")
+
+    try:
+        if params.name == "generate_ground_track":
+            result = await handle_generate_ground_track(
+                satellite_identifier=arguments["satellite_identifier"],
+                start_time=arguments.get("start_time"),
+                duration=arguments.get("duration"),
+                step_interval=arguments.get("step_interval"),
+            )
+        elif params.name == "get_satellite_info":
+            result = await handle_get_satellite_info(
+                satellite_identifier=arguments["satellite_identifier"]
+            )
+        else:
+            result = await handle_search_satellites(
+                query=arguments["query"],
+                limit=arguments.get("limit", 10),
+            )
+        return _json_tool_result(result, ctx.protocol_version)
+    except Exception as exc:
+        return _tool_error_result(params.name, str(exc))
+
+
+server = Server(
+    SERVER_NAME,
+    version=SERVER_VERSION,
+    title="TAT-C MCP Server",
+    description="Satellite metadata lookup and TAT-C ground track generation tools.",
+    instructions=SERVER_INSTRUCTIONS,
+    on_list_tools=list_tools,
+    on_call_tool=call_tool,
+)
+
+
+async def _run_stdio() -> None:
+    from mcp.server.stdio import stdio_server
+
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream, write_stream, server.create_initialization_options()
+        )
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Run the TAT-C MCP server.")
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "streamable-http"),
+        default="stdio",
+        help="Transport to serve. Defaults to stdio for local MCP clients.",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="Host for streamable HTTP.")
+    parser.add_argument(
+        "--port", type=int, default=8000, help="Port for streamable HTTP."
+    )
+    parser.add_argument(
+        "--json-response",
+        action="store_true",
+        help="Use JSON responses for streamable HTTP instead of response streams.",
+    )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        help=(
+            "Allowed Host header for non-local Streamable HTTP. Repeat for multiple "
+            "values; a ':*' suffix allows any port."
         ),
-        "get_satellite_info": lambda: handle_get_satellite_info(
-            satellite_identifier=arguments.get("satellite_identifier")
+    )
+    parser.add_argument(
+        "--allowed-origin",
+        action="append",
+        default=[],
+        help=(
+            "Allowed Origin header for non-local Streamable HTTP. Repeat for multiple "
+            "browser origins; requests without Origin remain valid."
         ),
-        "search_satellites": lambda: handle_search_satellites(
-            query=arguments.get("query"),
-            limit=arguments.get("limit", 10),
+    )
+    parser.add_argument(
+        "--disable-dns-rebinding-protection",
+        action="store_true",
+        help=(
+            "Explicitly disable Host/Origin validation. Only use behind a trusted "
+            "reverse proxy that performs equivalent checks."
         ),
-    }
+    )
+    args = parser.parse_args(argv)
 
-    handler = handlers.get(name)
-    if not handler:
-        raise ValueError(f"Unknown tool: {name}")
+    if args.transport == "streamable-http":
+        import uvicorn
 
-    result = await handler()
-    return _format_result(result)
+        try:
+            transport_security = _transport_security_settings(
+                args.host,
+                args.allowed_host,
+                args.allowed_origin,
+                args.disable_dns_rebinding_protection,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+
+        uvicorn.run(
+            server.streamable_http_app(
+                stateless_http=True,
+                json_response=args.json_response,
+                host=args.host,
+                transport_security=transport_security,
+            ),
+            host=args.host,
+            port=args.port,
+        )
+        return 0
+
+    anyio.run(_run_stdio)
+    return 0
 
 
-# Run MCP server
 if __name__ == "__main__":
-    async def run_server():
-        async with stdio_server() as (read_stream, write_stream):
-            await server.run(read_stream, write_stream, server.create_initialization_options())
-
-    asyncio.run(run_server())
+    raise SystemExit(main())

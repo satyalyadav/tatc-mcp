@@ -7,7 +7,6 @@ import requests
 
 from tatc_mcp.validation import validate_norad_id, validate_tle_format
 
-
 SATCAT_URL = "https://celestrak.org/satcat/records.php"
 GP_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php"
 GP_JSON_URL = "https://celestrak.org/NORAD/elements/gp.php"
@@ -45,7 +44,10 @@ def _format_satcat_record(sat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     norad_id = sat.get("CATNR") or sat.get("NORAD_CAT_ID")
     name = sat.get("OBJECT_NAME") or sat.get("NAME", "Unknown")
 
-    if not norad_id:
+    # SATCAT includes historical objects. A populated decay date means the
+    # object no longer has current GP/TLE data, so returning it would break the
+    # documented search-then-resolve tool workflow.
+    if not norad_id or str(sat.get("DECAY_DATE") or "").strip():
         return None
 
     try:
@@ -74,10 +76,12 @@ def _fetch_satcat_records(query: str, limit: int = 50) -> List[Dict[str, Any]]:
         return []
 
     records: List[Dict[str, Any]] = []
-    for sat in data[:limit]:
+    for sat in data:
         formatted = _format_satcat_record(sat)
         if formatted is not None:
             records.append(formatted)
+        if len(records) >= limit:
+            break
     return records
 
 
@@ -108,7 +112,9 @@ def _score_search_result(query: str, candidate_name: str) -> int:
     return score
 
 
-def _rank_search_results(query: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _rank_search_results(
+    query: str, results: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     """Return search results in descending relevance order."""
     return sorted(
         results,
@@ -168,7 +174,7 @@ def _resolve_search_result(identifier: str) -> Optional[Dict[str, Any]]:
 
 def search_satellites_by_name(query: str, limit: int = 10) -> List[Dict]:
     """
-    Search for satellites by name using CelesTrak's SATCAT database.
+    Search for currently orbiting satellites by name using CelesTrak's SATCAT database.
 
     Args:
         query: Satellite name or partial name to search for
@@ -235,12 +241,12 @@ def fetch_tle(norad_id: int) -> Tuple[str, str]:
     # Validate NORAD ID
     norad_id = validate_norad_id(norad_id)
 
-    # Don't use FORMAT=tle parameter - it causes 403 errors
-    # The default format is TLE, so we don't need to specify it
+    # CelesTrak defaults GP queries to CSV, so request the legacy three-line
+    # TLE representation explicitly. The parser below also accepts 2LE data.
     try:
         response = requests.get(
             GP_TLE_URL,
-            params={"CATNR": norad_id},
+            params={"CATNR": norad_id, "FORMAT": "TLE"},
             allow_redirects=True,
             timeout=10,
         )
@@ -249,7 +255,9 @@ def fetch_tle(norad_id: int) -> Tuple[str, str]:
         # Check if response is empty or indicates no data
         response_text = response.text.strip()
         if not response_text:
-            raise ValueError(f"No TLE data returned from CelesTrak for NORAD ID {norad_id}")
+            raise ValueError(
+                f"No TLE data returned from CelesTrak for NORAD ID {norad_id}"
+            )
 
         # Check for common error messages from CelesTrak
         if "No GP data found" in response_text or "not found" in response_text.lower():
