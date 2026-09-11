@@ -228,6 +228,20 @@ That means this repository can be used locally today with Codex CLI, the current
 
 ## Troubleshooting
 
+**LLM API key:**
+
+The MCP server itself never calls an LLM and needs no key. Clients, test
+scripts, and harnesses that drive the tools with a model read a generic
+key from the environment via `tatc_mcp.llm_config`:
+
+- `LLM_API_KEY` (required): any OpenAI-compatible chat-completions key.
+- `LLM_BASE_URL` (optional): defaults to the ASU endpoint
+  `https://openai.rc.asu.edu/v1`.
+- `LLM_MODEL` (optional): defaults to `llama3-groq-70b-tool-use`.
+
+Put them in the project-root `.env` file (gitignored, see `.env.example`)
+or export them in your shell. A variable already in the environment always
+wins over `.env`.
 **MCP SDK Errors:**
 
 ```bash

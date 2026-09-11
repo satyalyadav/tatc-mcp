@@ -1,9 +1,16 @@
 from tatc_mcp import celestrak_client
+from tatc_mcp.validation import _tle_checksum
+
+
+def _padded_tle(line_number: str) -> str:
+    """Build a 69-char TLE line with a correct checksum digit."""
+    body = (line_number + " " + "0" * 67)[:68]
+    return body + str(_tle_checksum(body))
 
 
 def test_fetch_tle_requests_tle_format_and_parses_three_lines(monkeypatch):
-    line1 = "1 " + ("0" * 67)
-    line2 = "2 " + ("0" * 67)
+    line1 = _padded_tle("1")
+    line2 = _padded_tle("2")
 
     class FakeResponse:
         text = f"ISS (ZARYA)\n{line1}\n{line2}\n"
@@ -12,7 +19,7 @@ def test_fetch_tle_requests_tle_format_and_parses_three_lines(monkeypatch):
             return None
 
     def fake_get(url, **kwargs):
-        assert url == celestrak_client.GP_TLE_URL
+        assert url == celestrak_client.GP_URL
         assert kwargs["params"] == {"CATNR": 25544, "FORMAT": "TLE"}
         assert kwargs["allow_redirects"] is True
         assert kwargs["timeout"] == 10

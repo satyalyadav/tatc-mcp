@@ -1,39 +1,19 @@
 """Format TAT-C outputs to match server telemetry format specification."""
 
+import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 
-from tatc_mcp.validation import validate_coordinates as _validate_coordinates
 from tatc_mcp.validation import validate_altitude as _validate_altitude
+from tatc_mcp.validation import validate_coordinates
 
-
-def validate_coordinates(lat_deg: float, lon_deg: float) -> Tuple[float, float]:
-    """
-    Validate and normalize coordinates.
-
-    Args:
-        lat_deg: Latitude in degrees
-        lon_deg: Longitude in degrees
-
-    Returns:
-        Tuple of (validated_lat, validated_lon)
-
-    Raises:
-        ValueError: If coordinates are out of valid range
-    """
-    return _validate_coordinates(lat_deg, lon_deg)
+logger = logging.getLogger(__name__)
 
 
 def format_timestamp(time: datetime) -> str:
-    """
-    Format datetime to ISO-8601 UTC string with trailing 'Z'.
-
-    Args:
-        time: Datetime object (assumed to be UTC)
-
-    Returns:
-        ISO-8601 UTC string with trailing 'Z'
-    """
+    """Format a datetime as an ISO-8601 UTC string with trailing 'Z'."""
+    if not isinstance(time, datetime):
+        raise ValueError(f"time must be a datetime object, got {type(time)}")
     if time.tzinfo is None:
         time = time.replace(tzinfo=timezone.utc)
     else:
@@ -44,18 +24,10 @@ def format_timestamp(time: datetime) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def format_position_lla(lat_deg: float, lon_deg: float, alt_m: float) -> Dict[str, float]:
-    """
-    Format position as LLA object per server telemetry format.
-
-    Args:
-        lat_deg: Latitude in degrees
-        lon_deg: Longitude in degrees
-        alt_m: Altitude in meters
-
-    Returns:
-        Dictionary with lat_deg, lon_deg, alt_m
-    """
+def format_position_lla(
+    lat_deg: float, lon_deg: float, alt_m: float
+) -> Dict[str, float]:
+    """Format a position as an LLA dict per the server telemetry format."""
     lat_deg, lon_deg = validate_coordinates(lat_deg, lon_deg)
     alt_m = _validate_altitude(alt_m)
 
@@ -66,29 +38,25 @@ def format_position_lla(lat_deg: float, lon_deg: float, alt_m: float) -> Dict[st
     }
 
 
-def format_footprint_geojson(coordinates: List[List[float]]) -> Optional[Dict[str, Any]]:
+def format_footprint_geojson(
+    coordinates: List[List[float]],
+) -> Optional[Dict[str, Any]]:
     """
-    Format footprint coordinates as GeoJSON Feature<Polygon> per server telemetry format.
-
-    Args:
-        coordinates: List of [lon, lat] coordinate pairs
-
-    Returns:
-        GeoJSON Feature<Polygon> dictionary, or None if coordinates are invalid
+    Format [lon, lat] coordinates as a GeoJSON Feature<Polygon>, or None if invalid.
     """
-    if not coordinates or len(coordinates) < 3:
+    if not isinstance(coordinates, (list, tuple)) or len(coordinates) < 3:
         return None
 
     # Validate and normalize coordinates
     validated_coords = []
     for coord in coordinates:
-        if len(coord) < 2:
+        if not isinstance(coord, (list, tuple)) or len(coord) < 2:
             continue
         lon, lat = coord[0], coord[1]
         try:
             lat, lon = validate_coordinates(lat, lon)
             validated_coords.append([lon, lat])
-        except ValueError:
+        except (ValueError, TypeError):
             continue
 
     if len(validated_coords) < 3:
@@ -104,24 +72,18 @@ def format_footprint_geojson(coordinates: List[List[float]]) -> Optional[Dict[st
         "type": "Feature",
         "geometry": {
             "type": "Polygon",
-            "coordinates": [validated_coords],  # Polygon coordinates are wrapped in an array
+            "coordinates": [
+                validated_coords
+            ],  # Polygon coordinates are wrapped in an array
         },
         "properties": {},
     }
 
 
 def format_trajectory_batch(
-    ground_track: List[Tuple[datetime, float, float, float]]
+    ground_track: List[Tuple[datetime, float, float, float]],
 ) -> List[Dict[str, Any]]:
-    """
-    Format ground track as trajectory_batches array per server telemetry format.
-
-    Args:
-        ground_track: List of (time, lat_deg, lon_deg, alt_m) tuples
-
-    Returns:
-        List of trajectory batch objects
-    """
+    """Format a ground track as a trajectory_batches array."""
     batches = []
     for time, lat_deg, lon_deg, alt_m in ground_track:
         try:
@@ -132,8 +94,9 @@ def format_trajectory_batch(
                 }
             )
         except ValueError as e:
-            # Skip invalid coordinates
-            print(f"Warning: Skipping invalid trajectory point: {e}")
+            # Skip invalid coordinates; log to stderr, never stdout, so
+            # MCP stdio framing stays intact.
+            logger.warning("Skipping invalid trajectory point: %s", e)
             continue
 
     return batches
@@ -148,21 +111,7 @@ def format_telemetry_message(
     lookpoint_lla: Optional[Tuple[float, float, float]] = None,
     state_flags: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """
-    Format a complete telemetry message per server telemetry format.
-
-    Args:
-        satellite_id: Stable satellite/platform identifier
-        time: Authoritative message epoch (UTC)
-        position_lla: Tuple of (lat_deg, lon_deg, alt_m)
-        footprint_coords: Optional list of [lon, lat] coordinates for footprint
-        trajectory_batches: Optional ground track data
-        lookpoint_lla: Optional boresight target (lat_deg, lon_deg, alt_m)
-        state_flags: Optional list of state flag strings
-
-    Returns:
-        Dictionary matching the server telemetry format
-    """
+    """Format one telemetry message per the server telemetry format."""
     if not satellite_id or not satellite_id.strip():
         raise ValueError("satellite_id must be a non-empty string")
 
@@ -202,17 +151,7 @@ def format_ground_track_response(
     ground_track: List[Tuple[datetime, float, float, float]],
     footprints: Optional[List[Optional[List[List[float]]]]] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Format a complete ground track response as an array of telemetry messages.
-
-    Args:
-        satellite_id: Stable satellite/platform identifier
-        ground_track: List of (time, lat_deg, lon_deg, alt_m) tuples
-        footprints: Optional list of footprint coordinates (one per ground track point)
-
-    Returns:
-        List of telemetry message dictionaries
-    """
+    """Format a ground track as an array of telemetry messages."""
     messages = []
 
     for i, (time, lat_deg, lon_deg, alt_m) in enumerate(ground_track):
@@ -229,8 +168,7 @@ def format_ground_track_response(
             )
             messages.append(message)
         except ValueError as e:
-            print(f"Warning: Skipping invalid telemetry point at {time}: {e}")
+            logger.warning("Skipping invalid telemetry point at %s: %s", time, e)
             continue
 
     return messages
-

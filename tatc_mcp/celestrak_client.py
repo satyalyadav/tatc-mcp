@@ -8,8 +8,7 @@ import requests
 from tatc_mcp.validation import validate_norad_id, validate_tle_format
 
 SATCAT_URL = "https://celestrak.org/satcat/records.php"
-GP_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php"
-GP_JSON_URL = "https://celestrak.org/NORAD/elements/gp.php"
+GP_URL = "https://celestrak.org/NORAD/elements/gp.php"
 
 # A few common colloquial names need explicit mapping because CelesTrak NAME search
 # is substring-based and can otherwise resolve to unrelated historical objects.
@@ -24,6 +23,12 @@ _COMMON_NAME_ALIASES = {
     "JAMES WEBB": 50463,
     "JAMES WEBB SPACE TELESCOPE": 50463,
     "JWST": 50463,
+    "TIANGONG": 48274,
+    "TIANGONG SPACE STATION": 48274,
+    "TIANHE": 48274,
+    "CSS": 48274,
+    "CSS TIANHE": 48274,
+    "CHINESE SPACE STATION": 48274,
 }
 
 
@@ -41,6 +46,8 @@ def _parse_json_response(response: requests.Response) -> Any:
 
 def _format_satcat_record(sat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Normalize a SATCAT record to the public search schema."""
+    if not isinstance(sat, dict):
+        return None
     norad_id = sat.get("CATNR") or sat.get("NORAD_CAT_ID")
     name = sat.get("OBJECT_NAME") or sat.get("NAME", "Unknown")
 
@@ -53,7 +60,7 @@ def _format_satcat_record(sat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     try:
         return {
             "norad_id": int(norad_id),
-            "name": name,
+            "name": str(name),
             "object_type": sat.get("OBJECT_TYPE", ""),
             "country": sat.get("COUNTRY") or sat.get("OWNER", ""),
             "launch_date": sat.get("LAUNCH_DATE", ""),
@@ -62,27 +69,83 @@ def _format_satcat_record(sat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _satcat_query_variants(query: str) -> List[str]:
+    """Return query variants to try against SATCAT in order.
+
+    CelesTrak NAME search is literal: "NOAA-19" matches nothing while
+    "NOAA 19" matches. The scoring layer already normalizes punctuation,
+    so this only expands what we send over the wire.
+    """
+    variants = [query]
+    spaced = re.sub(r"[-_]+", " ", query)
+    spaced = " ".join(spaced.split())
+    if spaced and spaced != query:
+        variants.append(spaced)
+    return variants
+
+
+def _fetch_raw_variant(variant: str) -> Optional[List[Dict[str, Any]]]:
+    """Fetch one SATCAT query variant, returning None when unusable."""
+    try:
+        response = requests.get(
+            SATCAT_URL,
+            params={"NAME": variant, "FORMAT": "json"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = _parse_json_response(response)
+    except (requests.RequestException, ValueError):
+        # "No SATCAT records found" is plain text, not JSON; a network
+        # error here should not block the remaining variants.
+        return None
+    return data if isinstance(data, list) else None
+
+
+def _iter_satcat_variants(query: str):
+    """Yield parsed SATCAT record lists per query variant, skipping unusable ones."""
+    for variant in _satcat_query_variants(query):
+        data = _fetch_raw_variant(variant)
+        if data:
+            yield data
+
+
 def _fetch_satcat_records(query: str, limit: int = 50) -> List[Dict[str, Any]]:
     """Fetch raw SATCAT records for a search query."""
-    response = requests.get(
-        SATCAT_URL,
-        params={"NAME": query, "FORMAT": "json"},
-        timeout=15,
+    for data in _iter_satcat_variants(query):
+        records: List[Dict[str, Any]] = []
+        for sat in data:
+            formatted = _format_satcat_record(sat)
+            if formatted is not None:
+                records.append(formatted)
+            if len(records) >= limit:
+                break
+        if records:
+            return records
+    return []
+
+
+def _decayed_match_hint(identifier: str) -> Optional[str]:
+    """Describe catalog matches that all decayed, if that is why search is empty."""
+    raw = next(_iter_satcat_variants(identifier), [])
+    if not raw:
+        return None
+    decayed = []
+    for sat in raw[:3]:
+        if not isinstance(sat, dict):
+            continue
+        decayed.append(
+            f"{sat.get('OBJECT_NAME', 'Unknown')} "
+            f"(NORAD {sat.get('NORAD_CAT_ID', '?')}, "
+            f"decayed {str(sat.get('DECAY_DATE') or 'date unknown').strip()})"
+        )
+    if not decayed:
+        return None
+    return (
+        f"Satellite identifier '{identifier}' matches catalog objects that have "
+        f"all decayed and no longer have TLE data: {'; '.join(decayed)}. "
+        f"The active object you want may be cataloged under a different name; "
+        f"use search_satellites with alternate spellings or provide a NORAD ID."
     )
-    response.raise_for_status()
-
-    data = _parse_json_response(response)
-    if not isinstance(data, list):
-        return []
-
-    records: List[Dict[str, Any]] = []
-    for sat in data:
-        formatted = _format_satcat_record(sat)
-        if formatted is not None:
-            records.append(formatted)
-        if len(records) >= limit:
-            break
-    return records
 
 
 def _score_search_result(query: str, candidate_name: str) -> int:
@@ -126,7 +189,7 @@ def _rank_search_results(
 def _fetch_gp_metadata(norad_id: int) -> Optional[Dict[str, Any]]:
     """Fetch current GP metadata for a NORAD ID."""
     response = requests.get(
-        GP_JSON_URL,
+        GP_URL,
         params={"CATNR": validate_norad_id(norad_id), "FORMAT": "json"},
         timeout=15,
     )
@@ -135,11 +198,15 @@ def _fetch_gp_metadata(norad_id: int) -> Optional[Dict[str, Any]]:
     data = _parse_json_response(response)
     if isinstance(data, list) and data:
         item = data[0]
-        return {
-            "norad_id": int(item.get("NORAD_CAT_ID", norad_id)),
-            "name": item.get("OBJECT_NAME", "").strip(),
-            "object_id": item.get("OBJECT_ID", "").strip(),
-        }
+        if isinstance(item, dict):
+            try:
+                return {
+                    "norad_id": int(item.get("NORAD_CAT_ID", norad_id)),
+                    "name": str(item.get("OBJECT_NAME") or "").strip(),
+                    "object_id": str(item.get("OBJECT_ID") or "").strip(),
+                }
+            except (ValueError, TypeError):
+                return None
     return None
 
 
@@ -152,6 +219,9 @@ def _resolve_search_result(identifier: str) -> Optional[Dict[str, Any]]:
     """Resolve a text identifier to a single search result or raise if ambiguous."""
     results = search_satellites_by_name(identifier, limit=10)
     if not results:
+        hint = _decayed_match_hint(identifier)
+        if hint is not None:
+            raise ValueError(hint)
         return None
 
     top_score = _score_search_result(identifier, results[0]["name"])
@@ -173,16 +243,7 @@ def _resolve_search_result(identifier: str) -> Optional[Dict[str, Any]]:
 
 
 def search_satellites_by_name(query: str, limit: int = 10) -> List[Dict]:
-    """
-    Search for currently orbiting satellites by name using CelesTrak's SATCAT database.
-
-    Args:
-        query: Satellite name or partial name to search for
-        limit: Maximum number of results to return
-
-    Returns:
-        List of dictionaries with keys: norad_id, name, object_type, country, launch_date
-    """
+    """Search currently orbiting satellites by name. Decayed objects are excluded."""
     try:
         results = _fetch_satcat_records(query, limit=max(limit, 25))
         ranked_results = _rank_search_results(query, results)
@@ -191,27 +252,21 @@ def search_satellites_by_name(query: str, limit: int = 10) -> List[Dict]:
     except requests.RequestException:
         # Silently return empty list for network errors
         return []
-    except Exception:
-        # Silently return empty list for parsing errors
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Search is best-effort; resolution reports the failure instead.
         return []
 
 
 def get_norad_id(satellite_identifier: str) -> Optional[int]:
-    """
-    Convert satellite name or NORAD ID string to integer NORAD ID.
-    Uses CelesTrak SATCAT database for name lookups.
-
-    Args:
-        satellite_identifier: Satellite name (case-insensitive) or NORAD ID as string
-
-    Returns:
-        NORAD ID as integer, or None if not found
-    """
+    """Resolve a name (case-insensitive) or NORAD ID string to an integer, or None."""
     # Try to parse as integer first
     try:
         return validate_norad_id(int(satellite_identifier))
-    except ValueError:
+    except (ValueError, TypeError):
         pass
+
+    if not isinstance(satellite_identifier, str):
+        return None
 
     alias_norad_id = _resolve_alias(satellite_identifier)
     if alias_norad_id is not None:
@@ -225,19 +280,7 @@ def get_norad_id(satellite_identifier: str) -> Optional[int]:
 
 
 def fetch_tle(norad_id: int) -> Tuple[str, str]:
-    """
-    Fetch TLE data from CelesTrak for a given NORAD ID.
-
-    Args:
-        norad_id: NORAD catalog number
-
-    Returns:
-        Tuple of (line1, line2) TLE strings
-
-    Raises:
-        ValueError: If TLE data cannot be fetched or parsed
-        requests.RequestException: If API request fails
-    """
+    """Fetch (line1, line2) TLE strings from CelesTrak for a NORAD ID."""
     # Validate NORAD ID
     norad_id = validate_norad_id(norad_id)
 
@@ -245,7 +288,7 @@ def fetch_tle(norad_id: int) -> Tuple[str, str]:
     # TLE representation explicitly. The parser below also accepts 2LE data.
     try:
         response = requests.get(
-            GP_TLE_URL,
+            GP_URL,
             params={"CATNR": norad_id, "FORMAT": "TLE"},
             allow_redirects=True,
             timeout=10,
@@ -264,6 +307,8 @@ def fetch_tle(norad_id: int) -> Tuple[str, str]:
             raise ValueError(
                 f"TLE data not available for NORAD ID {norad_id}. "
                 f"The satellite may have decayed, been decommissioned, or the ID may be incorrect. "
+                f"Deep-space objects without Earth-orbit GP data (e.g. JWST at Sun-Earth L2) "
+                f"also have no TLE. "
                 f"Response: {response_text[:200]}"
             )
 
@@ -299,54 +344,27 @@ def fetch_tle(norad_id: int) -> Tuple[str, str]:
             f"Timeout while fetching TLE from CelesTrak for NORAD ID {norad_id}"
         )
     except requests.HTTPError as e:
-        raise requests.RequestException(
-            f"HTTP error {e.response.status_code} while fetching TLE from CelesTrak: {e}"
+        status = e.response.status_code if e.response is not None else "unknown"
+        hint = (
+            " The ID may be incorrect, or the object may have no Earth-orbit GP data "
+            "(e.g. deep-space missions like JWST at Sun-Earth L2 have no TLE)."
+            if status == 404
+            else ""
         )
+        raise requests.RequestException(
+            f"HTTP error {status} while fetching TLE from CelesTrak: {e}.{hint}"
+        ) from e
     except requests.RequestException as e:
-        raise requests.RequestException(f"Failed to fetch TLE from CelesTrak: {e}")
+        raise requests.RequestException(
+            f"Failed to fetch TLE from CelesTrak: {e}"
+        ) from e
     except ValueError:
         # Re-raise validation errors
         raise
-    except Exception as e:
-        raise ValueError(f"Unexpected error parsing TLE data: {e}")
-
-
-def fetch_tle_by_name(satellite_name: str) -> Tuple[str, str]:
-    """
-    Fetch TLE data by satellite name.
-
-    Args:
-        satellite_name: Satellite name (will be searched in CelesTrak database)
-
-    Returns:
-        Tuple of (line1, line2) TLE strings
-
-    Raises:
-        ValueError: If satellite name cannot be resolved to NORAD ID or TLE fetch fails
-    """
-    norad_id = get_norad_id(satellite_name)
-    if norad_id is None:
-        raise ValueError(
-            f"Satellite '{satellite_name}' not found. "
-            f"Please provide a valid satellite name or NORAD ID."
-        )
-    return fetch_tle(norad_id)
 
 
 def get_satellite_info(satellite_identifier: str) -> Dict:
-    """
-    Get satellite information including TLE data.
-
-    Args:
-        satellite_identifier: Satellite name or NORAD ID
-
-    Returns:
-        Dictionary with satellite information:
-        - norad_id: NORAD catalog number
-        - name: Satellite name (if available)
-        - tle_line1: First TLE line
-        - tle_line2: Second TLE line
-    """
+    """Get norad_id, name, and both TLE lines for a satellite name or NORAD ID."""
     norad_id = get_norad_id(satellite_identifier)
     if norad_id is None:
         raise ValueError(
@@ -354,7 +372,11 @@ def get_satellite_info(satellite_identifier: str) -> Dict:
         )
 
     line1, line2 = fetch_tle(norad_id)
-    metadata = _fetch_gp_metadata(norad_id)
+    try:
+        metadata = _fetch_gp_metadata(norad_id)
+    except (requests.RequestException, ValueError):
+        # Metadata is a nicety; TLE success is what matters.
+        metadata = None
 
     if metadata and metadata.get("name"):
         name = metadata["name"]

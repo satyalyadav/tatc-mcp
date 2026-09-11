@@ -110,11 +110,7 @@ _GROUND_TRACK_INPUT_SCHEMA: Dict[str, Any] = {
         },
         "step_interval": {
             "type": "string",
-            "description": (
-                "Time step interval between data points. Use this whenever the user specifies "
-                "steps or intervals, such as '10 seconds', '30 sec', '1 minute', or '5 mins'. "
-                "Default: '1 minute' only if the user does not specify any time step."
-            ),
+            "description": "Time step between points (e.g., '30 sec', '1 minute', default: 1 minute)",
         },
     },
     "required": ["satellite_identifier"],
@@ -168,10 +164,7 @@ _TELEMETRY_SCHEMA: Dict[str, Any] = {
         "id": {"type": "string"},
         "time": {"type": "string", "format": "date-time"},
         "position_lla": _POSITION_SCHEMA,
-        "lookpoint_lla": _POSITION_SCHEMA,
         "footprint_geojson": {"type": "object"},
-        "state_flags": {"type": "array", "items": {"type": "string"}},
-        "trajectory_batches": {"type": "array", "items": {"type": "object"}},
     },
     "required": ["id", "time", "position_lla"],
 }
@@ -190,7 +183,7 @@ _LEGACY_GROUND_TRACK_OUTPUT_SCHEMA: Dict[str, Any] = {
 _SATELLITE_INFO_OUTPUT_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
-        "norad_id": {"type": ["integer", "string"]},
+        "norad_id": {"type": "integer"},
         "name": {"type": "string"},
         "tle_line1": {"type": "string"},
         "tle_line2": {"type": "string"},
@@ -288,6 +281,8 @@ def parse_time_input(time_str: str) -> datetime:
     Supports ISO-8601 format, "now", "current", and relative expressions like
     "in 1 hour" or "in one hour".
     """
+    if not isinstance(time_str, str):
+        raise ValueError(f"Time must be a string, got {type(time_str)}")
     normalized = time_str.strip().lower()
 
     if normalized in ("now", "current"):
@@ -309,11 +304,16 @@ def parse_time_input(time_str: str) -> datetime:
 
 
 def parse_duration(duration_str: str) -> timedelta:
-    """Parse a duration string such as "1 hour", "one hour", or "60 minutes"."""
+    """Parse a duration string such as "1 hour", "one hour", or "60 minutes".
+
+    A bare number with no unit means minutes.
+    """
+    if not isinstance(duration_str, str):
+        raise ValueError(f"Duration must be a string, got {type(duration_str)}")
     normalized = duration_str.strip().lower()
 
     try:
-        return timedelta(minutes=int(normalized))
+        return timedelta(minutes=float(normalized))
     except ValueError:
         pass
 
@@ -372,13 +372,7 @@ async def handle_generate_ground_track(
 
 async def handle_get_satellite_info(satellite_identifier: str) -> Dict[str, Any]:
     """Get satellite information including TLE data."""
-    info = get_satellite_info(satellite_identifier)
-    return {
-        "norad_id": info["norad_id"],
-        "name": info["name"],
-        "tle_line1": info["tle_line1"],
-        "tle_line2": info["tle_line2"],
-    }
+    return get_satellite_info(satellite_identifier)
 
 
 async def handle_search_satellites(query: str, limit: int = 10) -> List[Dict[str, Any]]:
@@ -528,13 +522,14 @@ async def call_tool(
             result = await handle_get_satellite_info(
                 satellite_identifier=arguments["satellite_identifier"]
             )
-        else:
+        else:  # search_satellites is the only remaining registered tool
             result = await handle_search_satellites(
                 query=arguments["query"],
                 limit=arguments.get("limit", 10),
             )
         return _json_tool_result(result, ctx.protocol_version)
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # Any tool failure becomes a model-visible error, never a crash.
         return _tool_error_result(params.name, str(exc))
 
 
