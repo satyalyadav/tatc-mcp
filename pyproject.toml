@@ -5,6 +5,7 @@ description = "MCP server for satellite ground track generation using TAT-C"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "anyio>=4.9.0",
     "numpy<2.2",
     "mcp==2.0.0",
     "jsonschema>=4.20.0",

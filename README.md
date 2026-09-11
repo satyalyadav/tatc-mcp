@@ -40,7 +40,7 @@ For remote clients, run the stateless Streamable HTTP transport:
 python -m tatc_mcp.server --transport streamable-http --host 127.0.0.1 --port 8000
 ```
 
-The v2 SDK handles `server/discover`, per-request protocol metadata, `resultType` fields, required Streamable HTTP routing headers, and backwards compatibility with pre-2026 clients. The server advertises native array schemas/content to 2026 clients and automatically uses an object-root `{ "data": [...] }` compatibility envelope for older clients. The HTTP server uses the sessionless `2026-07-28` path and configures the legacy path as stateless because these tools do not need a server-to-client backchannel.
+The v2 SDK handles `server/discover`, per-request protocol metadata, `resultType` fields, required Streamable HTTP routing headers, and backwards compatibility with pre-2026 clients. For list-valued tools, MCP `2026-07-28` clients receive a native array schema and array-valued `structuredContent`; legacy clients receive an object-root `{ "data": [...] }` compatibility envelope. Both protocol versions receive the returned value as human-readable JSON text. The HTTP server uses the sessionless `2026-07-28` path and configures the legacy path as stateless because these tools do not need a server-to-client backchannel.
 
 For a public listener, explicitly allow the externally visible Host header (and any browser Origin that will call it):
 
@@ -70,7 +70,7 @@ Generates ground track for a satellite.
 
 **Returns:** Array of telemetry objects with `id`, `time`, `position_lla` (lat/lon/alt), and optional `footprint_geojson` when geometry is available.
 
-MCP clients receive this as both human-readable JSON text and array-valued `structuredContent`.
+MCP `2026-07-28` clients receive a native array in `structuredContent`. Legacy clients receive the same list in the compatibility envelope `{ "data": [...] }`. Both clients also receive the list as human-readable JSON text.
 
 ### `get_satellite_info`
 
@@ -95,7 +95,7 @@ Search for currently orbiting satellites by name in the CelesTrak database. Hist
 
 **Returns:** List of satellite dictionaries with NORAD ID, name, object type, country, and launch date.
 
-MCP clients receive this as both human-readable JSON text and array-valued `structuredContent`.
+MCP `2026-07-28` clients receive a native array in `structuredContent`. Legacy clients receive the same list in the compatibility envelope `{ "data": [...] }`. Both clients also receive the list as human-readable JSON text.
 
 ## Example Prompts
 
@@ -114,7 +114,7 @@ The server supports:
 
 ## Output Format
 
-The server returns an array. Each telemetry object is shaped like:
+List-valued tools return a native JSON array to MCP `2026-07-28` clients. Legacy clients receive the same list under the `data` key in `{ "data": [...] }`. The text content contains the JSON array in both modes. Each telemetry object is shaped like:
 
 ```json
 {
