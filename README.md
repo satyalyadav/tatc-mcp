@@ -1,5 +1,7 @@
 # TAT-C MCP Server
 
+**Status.** This repository is retired. Development continues in [code-lab-org/tatc-ai](https://github.com/code-lab-org/tatc-ai), which carries the maintained MCP server under `apps/mcp-server`.
+
 An MCP (Model Context Protocol) server that provides satellite ground track generation using the TAT-C library. The project is intentionally server-first: it exposes a standalone MCP server that can be used with any MCP-compatible LLM client and returns a consistent telemetry payload for downstream tools.
 
 **Use Cases:**
